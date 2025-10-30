@@ -33,7 +33,12 @@ Download GCC checkpoint from https://drive.google.com/file/d/1lYW_idy9PwSdPEC7j9
 ```bash
 CUDA_VISIBLE_DEVICES=0 python gcc.py --lr 1e-3 --epochs 100 --dataset Cora_ML --model GCC --use_adj --seeds 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
 ```
+python graphcontrol.py --dataset chameleon --use_disenlink --seeds 0 1 2 3 4
 
+python graphcontrol.py --dataset Chameleon --epochs 100 --lr 0.5 --optimizer adamw --weight_decay 5e-4 --threshold 0.17 --walk_steps 256 --restart 0.8 --use_disenlink --disenlink_epochs 200 --seeds 0 1 2 3 4
+
+
+python graphcontrol.py --dataset Cora_ML --epochs 100 --lr 0.5 --optimizer adamw --weight_decay 5e-4 --threshold 0.17 --walk_steps 256 --restart 0.8 --use_disenlink --use_disenlink 1000 --seeds 0 1 2 3 4
 **GCC with GraphControl**
 
 ```bash

@@ -241,6 +241,9 @@ class DisenLinkConditionGenerator:
         # Convert to dense adjacency matrix
         adj = to_dense_adj(edge_index, max_num_nodes=x.size(0))[0]
 
+        # Ensure adj is in [0, 1] range (should be binary)
+        adj = adj.clamp(0, 1)
+
         # Initialize model if needed
         if self.disenlink is None:
             self._init_model(x.size(1))
@@ -258,10 +261,27 @@ class DisenLinkConditionGenerator:
             # Forward pass
             h, link_pred, alpha = self.disenlink(x, adj)
 
+            # Clamp predictions to valid range [eps, 1-eps] for numerical stability
+            link_pred = torch.clamp(link_pred, min=1e-7, max=1-1e-7)
+
+            # Check for NaN/Inf
+            if torch.isnan(link_pred).any() or torch.isinf(link_pred).any():
+                print(f"Warning: NaN/Inf detected in link_pred at epoch {epoch+1}, skipping...")
+                continue
+
             # Link reconstruction loss (binary cross-entropy)
-            loss = F.binary_cross_entropy(link_pred, adj)
+            loss = F.binary_cross_entropy(link_pred, adj, reduction='mean')
+
+            # Check for NaN/Inf in loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"Warning: NaN/Inf loss at epoch {epoch+1}, skipping...")
+                continue
 
             loss.backward()
+
+            # Gradient clipping for stability
+            torch.nn.utils.clip_grad_norm_(self.disenlink.parameters(), max_norm=1.0)
+
             optimizer.step()
 
             if verbose and (epoch + 1) % 20 == 0:
@@ -293,6 +313,10 @@ class DisenLinkConditionGenerator:
         self.disenlink.eval()
         with torch.no_grad():
             _, link_pred, _ = self.disenlink(x, adj)
+
+            # Clamp to valid range and handle NaN/Inf
+            link_pred = torch.clamp(link_pred, min=0.0, max=1.0)
+            link_pred = torch.nan_to_num(link_pred, nan=0.5, posinf=1.0, neginf=0.0)
 
         return link_pred
 
