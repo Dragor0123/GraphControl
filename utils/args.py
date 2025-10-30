@@ -39,6 +39,16 @@ class Arguments:
         self.parser.add_argument('--walk_length', type=int, default=50, help="Walk length for node2vec")
         self.parser.add_argument('--context_size', type=int, default=10, help="Context size for node2vec")
         self.parser.add_argument('--walk_per_nodes', type=int, default=10, help="Walk per nodes for node2vec")
-        
+
+        # DisenLink condition generation
+        self.parser.add_argument('--use_disenlink', action='store_true',
+                                help="Use DisenLink for condition matrix generation (better for heterophilic graphs)")
+        self.parser.add_argument('--disenlink_factors', type=int, default=None,
+                                help="Number of disentangled factors (overrides dataset-specific config)")
+        self.parser.add_argument('--disenlink_alpha', type=float, default=None,
+                                help="Hybrid weight for feature similarity (0-1, overrides dataset-specific config)")
+        self.parser.add_argument('--disenlink_epochs', type=int, default=None,
+                                help="Training epochs for DisenLink (default: 100 for first subgraph, 50 for rest)")
+
     def parse_args(self):
         return self.parser.parse_args()

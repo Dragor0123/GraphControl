@@ -9,6 +9,7 @@ from utils.args import Arguments
 from utils.sampling import collect_subgraphs
 from utils.transforms import process_attributes, obtain_attributes
 from models import load_model
+from models.disenlink_condition import DisenLinkConditionGenerator, get_dataset_specific_config
 from datasets import NodeDataset
 from optimizers import create_optimizer
 
@@ -98,15 +99,83 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
 
 
 def main(config):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') 
-    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     dataset_obj = NodeDataset(config.dataset, n_seeds=config.seeds)
     dataset_obj.print_statistics()
-    
-    # For large graph, we use cpu to preprocess it rather than gpu because of OOM problem.
-    if dataset_obj.num_nodes < 30000:
-        dataset_obj.to(device)
-    x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold).to(device)
+
+    # Initialize DisenLink condition generator if enabled
+    disenlink_generator = None
+    if hasattr(config, 'use_disenlink') and config.use_disenlink:
+        print(f"\n=== Using DisenLink for condition generation ===")
+
+        # Get dataset-specific config
+        disenlink_config = get_dataset_specific_config(config.dataset)
+
+        # Override with user config if provided (only if not None)
+        if hasattr(config, 'disenlink_factors') and config.disenlink_factors is not None:
+            disenlink_config['num_factors'] = config.disenlink_factors
+        if hasattr(config, 'disenlink_alpha') and config.disenlink_alpha is not None:
+            disenlink_config['hybrid_alpha'] = config.disenlink_alpha
+        if hasattr(config, 'disenlink_epochs') and config.disenlink_epochs is not None:
+            disenlink_config['disenlink_epochs'] = config.disenlink_epochs
+
+        print(f"DisenLink config: {disenlink_config}")
+
+        disenlink_generator = DisenLinkConditionGenerator(
+            num_factors=disenlink_config['num_factors'],
+            hidden_dim=disenlink_config['hidden_dim'],
+            embed_dim=disenlink_config['embed_dim'],
+            use_hybrid=disenlink_config['use_hybrid'],
+            hybrid_alpha=disenlink_config['hybrid_alpha'],
+            beta=disenlink_config['beta'],
+            device=device,
+            train_epochs=disenlink_config.get('disenlink_epochs', 100)
+        )
+
+    # Generate condition matrix (either DisenLink or feature similarity)
+    if disenlink_generator is not None:
+        # Keep data on CPU for subgraph collection
+        train_mask = dataset_obj.data.train_mask
+        if train_mask.dim() > 1:
+            train_idx = train_mask[:, 0].nonzero().squeeze()
+        else:
+            train_idx = train_mask.nonzero().squeeze()
+
+        # Sample fewer subgraphs for DisenLink training (faster)
+        sample_size = min(100, len(train_idx))
+        sample_idx = train_idx[torch.randperm(len(train_idx))[:sample_size]]
+
+        print(f"Collecting {sample_size} subgraphs for DisenLink training...")
+        disenlink_subgraphs = collect_subgraphs(
+            sample_idx,
+            dataset_obj.data,
+            walk_steps=config.walk_steps,
+            restart_ratio=config.restart
+        )
+
+        x_sim = obtain_attributes(
+            dataset_obj.data,
+            use_adj=False,
+            threshold=config.threshold,
+            use_disenlink=True,
+            disenlink_generator=disenlink_generator,
+            subgraphs=disenlink_subgraphs
+        ).to(device)
+
+        # Now move dataset to device if needed
+        if dataset_obj.num_nodes < 30000:
+            dataset_obj.to(device)
+    else:
+        # For large graph, we use cpu to preprocess it rather than gpu because of OOM problem.
+        if dataset_obj.num_nodes < 30000:
+            dataset_obj.to(device)
+
+        x_sim = obtain_attributes(
+            dataset_obj.data,
+            use_adj=False,
+            threshold=config.threshold
+        ).to(device)
     
     dataset_obj.to('cpu') # Otherwise the deepcopy will raise an error
     num_node_features = config.num_dim
