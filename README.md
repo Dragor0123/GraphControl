@@ -54,9 +54,33 @@ CUDA_VISIBLE_DEVICES=0 python node2vec.py --dataset Hindex --lr 1e-2 --epochs 10
 CUDA_VISIBLE_DEVICES=0 python graphcontrol.py --dataset Hindex --epochs 100 --lr 0.1 --optimizer sgd --weight_decay 5e-4 --threshold 0.17 --walk_steps 256 --restart 0.5 --seeds 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
 ```
 
+## For Heterophilic Graphs
+
+**Heterophilic datasets (Chameleon, Squirrel, Actor) are now supported**
+
+These datasets have node attributes, so no need for node2vec preprocessing.
+
+**GCC with GraphControl on Chameleon**
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python graphcontrol.py --dataset Chameleon --epochs 100 --lr 0.5 --optimizer adamw --weight_decay 5e-4 --threshold 0.17 --walk_steps 256 --restart 0.8 --seeds 0 1 2 3 4 5 6 7 8 9
+```
+
+**GCC with GraphControl on Squirrel**
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python graphcontrol.py --dataset Squirrel --epochs 100 --lr 0.5 --optimizer adamw --weight_decay 5e-4 --threshold 0.17 --walk_steps 256 --restart 0.8 --seeds 0 1 2 3 4 5 6 7 8 9
+```
+
+**GCC with GraphControl on Actor**
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python graphcontrol.py --dataset Actor --epochs 100 --lr 0.5 --optimizer adamw --weight_decay 5e-4 --threshold 0.17 --walk_steps 256 --restart 0.8 --seeds 0 1 2 3 4 5 6 7 8 9
+```
+
 ## Illustration of arguements
 ```
---dataset: default Cora_ML, [Cora_ML, Photo, Physics, DBLP, usa, brazil, europe, Hindex] can also be choosen
+--dataset: default Cora_ML, [Cora_ML, Photo, Physics, DBLP, usa, brazil, europe, Hindex, Chameleon, Squirrel, Actor] can also be choosen
 --model: default GCC_GraphControl, [GCC, GCC_GraphControl] can also be choosen. GCC refers to utilizing GCC as a pre-trained model and fine-tuning it on target data. On the other hand, GCC_GraphControl involves incorporating GraphControl with GCC to address the "transferability-specificity dilemma." Additional pre-trained models will be introduced in the updated version.
 ```
 More details and explanations are in `utils/args.py`

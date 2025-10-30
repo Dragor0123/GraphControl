@@ -17,9 +17,19 @@ def preprocess(config, dataset_obj, device):
     kwargs = {'batch_size': config.batch_size, 'num_workers': 4, 'persistent_workers': True, 'pin_memory': True}
     
     print('generating subgraphs....')
-    
-    train_idx = dataset_obj.data.train_mask.nonzero().squeeze()
-    test_idx = dataset_obj.data.test_mask.nonzero().squeeze()
+
+    # Handle both 1D and 2D masks (for datasets with multiple preset splits)
+    train_mask = dataset_obj.data.train_mask
+    test_mask = dataset_obj.data.test_mask
+
+    if train_mask.dim() > 1:
+        # For datasets with multiple splits, use the first split
+        train_idx = train_mask[:, 0].nonzero().squeeze()
+        test_idx = test_mask[:, 0].nonzero().squeeze()
+    else:
+        # For datasets with single split
+        train_idx = train_mask.nonzero().squeeze()
+        test_idx = test_mask.nonzero().squeeze()
     
     train_graphs = collect_subgraphs(train_idx, dataset_obj.data, walk_steps=config.walk_steps, restart_ratio=config.restart)
     test_graphs = collect_subgraphs(test_idx, dataset_obj.data, walk_steps=config.walk_steps, restart_ratio=config.restart)
