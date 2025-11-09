@@ -54,27 +54,26 @@ class RWR:
         start_nodes = torch.randperm(node_num)[:graph_num]
         edge_index = graph.edge_index
 
-        value = torch.arange(edge_index.size(1))
-        self.adj_t = SparseTensor(row=edge_index[0], col=edge_index[1],
-                                      value=value,
-                                      sparse_sizes=(node_num, node_num)).t()
+        # Create SparseTensor with proper handling for heterophilic graphs
+        self.adj_t = SparseTensor(row=edge_index[1], col=edge_index[0],
+                                  sparse_sizes=(node_num, node_num)).coalesce()
 
         view1_list = []
         view2_list = []
 
         views_cnt = 1 if self.aligned else 2
         for view_idx in range(views_cnt):
-            current_nodes = start_nodes.clone()
+            current_nodes = start_nodes.clone().contiguous()
             history = start_nodes.clone().unsqueeze(0)
             signs = torch.ones(graph_num, dtype=torch.bool).unsqueeze(0)
             for i in range(self.walk_steps):
                 seed = torch.rand([graph_num])
-                nei = self.adj_t.sample(1, current_nodes).squeeze()
+                nei = self.adj_t.sample(1, current_nodes.contiguous()).squeeze()
                 sign = seed < self.restart_ratio
                 nei[sign] = start_nodes[sign]
                 history = torch.cat((history, nei.unsqueeze(0)), dim=0)
                 signs = torch.cat((signs, sign.unsqueeze(0)), dim=0)
-                current_nodes = nei
+                current_nodes = nei.contiguous()
             history = history.T
             signs = signs.T
             
@@ -120,27 +119,28 @@ class RWR:
     
 def collect_subgraphs(selected_id, graph, walk_steps=20, restart_ratio=0.5):
     graph  = copy.deepcopy(graph) # modified on the copy
-    edge_index = graph.edge_index
     node_num = graph.x.shape[0]
+    edge_index = to_undirected(graph.edge_index)
+    edge_index = add_remaining_selfloop_for_isolated_nodes(edge_index, node_num)
+    graph.edge_index = edge_index
     start_nodes = selected_id # only sampling selected nodes as subgraphs
     graph_num = start_nodes.shape[0]
     
-    value = torch.arange(edge_index.size(1))
-    adj_t = SparseTensor(row=edge_index[0], col=edge_index[1],
-                                    value=value,
-                                    sparse_sizes=(node_num, node_num)).t()
+    # Create SparseTensor with proper handling for heterophilic graphs
+    adj_t = SparseTensor(row=edge_index[1], col=edge_index[0],
+                         sparse_sizes=(node_num, node_num)).coalesce()
     
-    current_nodes = start_nodes.clone()
+    current_nodes = start_nodes.clone().contiguous()
     history = start_nodes.clone().unsqueeze(0)
     signs = torch.ones(graph_num, dtype=torch.bool).unsqueeze(0)
     for i in range(walk_steps):
         seed = torch.rand([graph_num])
-        nei = adj_t.sample(1, current_nodes).squeeze()
+        nei = adj_t.sample(1, current_nodes.contiguous()).squeeze()
         sign = seed < restart_ratio
         nei[sign] = start_nodes[sign]
         history = torch.cat((history, nei.unsqueeze(0)), dim=0)
         signs = torch.cat((signs, sign.unsqueeze(0)), dim=0)
-        current_nodes = nei
+        current_nodes = nei.contiguous()
     history = history.T
     signs = signs.T
     
