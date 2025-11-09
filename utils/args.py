@@ -6,6 +6,8 @@ class Arguments:
         self.parser.add_argument("--seeds", type=int, nargs="+", default=[0])
         # Dataset
         self.parser.add_argument('--dataset', type=str, help="dataset name", default='Cora_ML')
+        # Few-shot setting: number of training samples per class (None for standard setting)
+        self.parser.add_argument('--few_shot', type=int, default=None, help="number of training samples per class for few-shot learning (e.g., 5 for 5-shot)")
 
         # Model configuration
         self.parser.add_argument('--layer_num', type=int, help="the number of encoder's layers", default=2)

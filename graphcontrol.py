@@ -81,8 +81,8 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
             else:
                 count += 1
 
-        if count == patience:
-            break
+        # if count == patience:
+        #     break
 
     return best_acc
 
@@ -90,8 +90,11 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
 def main(config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') 
     
-    dataset_obj = NodeDataset(config.dataset, n_seeds=config.seeds)
+    # Create dataset with few-shot setting if specified
+    dataset_obj = NodeDataset(config.dataset, n_seeds=config.seeds, few_shot=config.few_shot)
     dataset_obj.print_statistics()
+    if config.few_shot is not None:
+        print(f'Few-shot setting: {config.few_shot} samples per class for training')
     
     # For large graph, we use cpu to preprocess it rather than gpu because of OOM problem.
     if dataset_obj.num_nodes < 30000:

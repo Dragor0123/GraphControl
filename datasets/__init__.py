@@ -47,7 +47,7 @@ def load_dataset(dataset_name, trans=None):
     
 
 class NodeDataset:
-    def __init__(self, dataset_name, trans=None, n_seeds=[0]) -> None:
+    def __init__(self, dataset_name, trans=None, n_seeds=[0], few_shot=None) -> None:
         self.path = PATH
         self.dataset_name = dataset_name
         if dataset_name in ['Hindex', 'Actor']:
@@ -86,7 +86,7 @@ class NodeDataset:
         if not hasattr(self.data, 'train_mask'):
             self.random_split = True
             num_train = int(self.num_nodes*0.1)
-            
+
             train_mask_list = []
             test_mask_list = []
             for seed in n_seeds:
@@ -96,19 +96,66 @@ class NodeDataset:
                 train_idx = rand_node_idx[:num_train]
                 train_mask = torch.zeros(self.num_nodes).bool()
                 train_mask[train_idx] = True
-                
+
                 test_mask = torch.ones_like(train_mask).bool()
                 test_mask[train_idx] = False
                 train_mask_list.append(train_mask.unsqueeze(1))
                 test_mask_list.append(test_mask.unsqueeze(1))
-            
+
             self.data.train_mask = torch.cat(train_mask_list, dim=1)
             self.data.test_mask = torch.cat(test_mask_list, dim=1)
 
+        # Few-shot setting: select few_shot samples per class for training
+        if few_shot is not None:
+            self._create_few_shot_splits(few_shot, n_seeds)
+
+
+    def _create_few_shot_splits(self, few_shot, n_seeds):
+        """
+        Create few-shot splits: select few_shot samples per class for training.
+
+        Args:
+            few_shot: number of training samples per class
+            n_seeds: list of random seeds for different splits
+        """
+        train_mask_list = []
+        test_mask_list = []
+
+        # Get class labels
+        if len(self.data.y.shape) >= 2:  # one-hot labels
+            y = self.data.y.argmax(1)
+        else:
+            y = self.data.y
+
+        for seed in n_seeds:
+            reset_random_seed(seed)
+
+            train_mask = torch.zeros(self.num_nodes).bool()
+
+            # For each class, randomly select few_shot samples
+            for class_id in range(self.num_classes):
+                class_indices = (y == class_id).nonzero(as_tuple=True)[0]
+
+                # Randomly shuffle and select few_shot samples
+                perm = torch.randperm(class_indices.size(0))
+                selected_indices = class_indices[perm[:few_shot]]
+
+                train_mask[selected_indices] = True
+
+            # Test mask: all nodes except training nodes
+            test_mask = ~train_mask
+
+            train_mask_list.append(train_mask.unsqueeze(1))
+            test_mask_list.append(test_mask.unsqueeze(1))
+
+        # Override train/test masks with few-shot splits
+        self.data.train_mask = torch.cat(train_mask_list, dim=1)
+        self.data.test_mask = torch.cat(test_mask_list, dim=1)
+        self.random_split = True  # Mark as custom split
 
     def generate_subgraph(self):
         pass
-    
+
     def split_train_test(self, split_ratio=0.8):
         raise NotImplementedError('do not set parameter <split>')
     
