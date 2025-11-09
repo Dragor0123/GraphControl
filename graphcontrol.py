@@ -96,7 +96,8 @@ def main(config):
     # For large graph, we use cpu to preprocess it rather than gpu because of OOM problem.
     if dataset_obj.num_nodes < 30000:
         dataset_obj.to(device)
-    x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold).to(device)
+    # Pass ground truth labels to filter heterophilic links in condition A'
+    x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold, labels=dataset_obj.data.y).to(device)
     
     dataset_obj.to('cpu') # Otherwise the deepcopy will raise an error
     num_node_features = config.num_dim

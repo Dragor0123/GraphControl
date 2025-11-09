@@ -6,9 +6,9 @@ import scipy
 
 from .normalize import similarity, get_laplacian_matrix
 
-def obtain_attributes(data, use_adj=False, threshold=0.1, num_dim=32):
+def obtain_attributes(data, use_adj=False, threshold=0.1, num_dim=32, labels=None):
     save_node_border = 30000
-        
+
     if use_adj:
         # to undirected and remove self-loop
         edges = to_undirected(data.edge_index)
@@ -16,9 +16,14 @@ def obtain_attributes(data, use_adj=False, threshold=0.1, num_dim=32):
         tmp = to_dense_adj(edges)[0]
     else:
         tmp = similarity(data.x, data.x)
-        
+
         # discretize the similarity matrix by threshold
         tmp = torch.where(tmp>threshold, 1.0, 0.0)
+
+        # Filter heterophilic links: set to 0 if nodes have different labels
+        if labels is not None:
+            label_matrix = labels.unsqueeze(1) == labels.unsqueeze(0)  # True if same class
+            tmp = tmp * label_matrix.float()  # Keep only homophilic links
 
     tmp = get_laplacian_matrix(tmp)
     if tmp.shape[0] > save_node_border:
