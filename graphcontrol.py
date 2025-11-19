@@ -81,8 +81,8 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
             else:
                 count += 1
 
-        # if count == patience:
-        #     break
+        if count == patience:
+            break
 
     return best_acc
 
@@ -90,34 +90,34 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
 def main(config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') 
     
-    # Create dataset with few-shot setting if specified
-    dataset_obj = NodeDataset(config.dataset, n_seeds=config.seeds, few_shot=config.few_shot)
+    dataset_obj = NodeDataset(config.dataset, n_seeds=config.seeds)
     dataset_obj.print_statistics()
-    if config.few_shot is not None:
-        print(f'Few-shot setting: {config.few_shot} samples per class for training')
     
     # For large graph, we use cpu to preprocess it rather than gpu because of OOM problem.
     if dataset_obj.num_nodes < 30000:
         dataset_obj.to(device)
-    # Pass ground truth labels to filter heterophilic links in condition A'
-    x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold, labels=dataset_obj.data.y).to(device)
+    x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold).to(device)
     
     dataset_obj.to('cpu') # Otherwise the deepcopy will raise an error
     num_node_features = config.num_dim
 
     train_masks = dataset_obj.data.train_mask
     test_masks = dataset_obj.data.test_mask
+    has_multiple_splits = train_masks.dim() > 1
 
     acc_list = []
 
     for i, seed in enumerate(config.seeds):
         reset_random_seed(seed)
-        if dataset_obj.random_split:
-            dataset_obj.data.train_mask = train_masks[:, seed]
-            dataset_obj.data.test_mask = test_masks[:, seed]
-        elif dataset_obj.data.train_mask.dim() > 1:
-            dataset_obj.data.train_mask = train_masks[:, seed]
-            dataset_obj.data.test_mask = test_masks[:, seed]
+        if has_multiple_splits:
+            if dataset_obj.random_split:
+                split_idx = i
+            else:
+                split_idx = seed
+            if split_idx >= train_masks.size(1):
+                raise ValueError(f"Requested split index {split_idx} exceeds available splits {train_masks.size(1)}.")
+            dataset_obj.data.train_mask = train_masks[:, split_idx]
+            dataset_obj.data.test_mask = test_masks[:, split_idx]
         
         train_loader, test_loader = preprocess(config, dataset_obj, device)
         
@@ -152,4 +152,5 @@ def eval_subgraph(config, model, test_loader, device, full_x_sim):
 
 if __name__ == '__main__':
     config = Arguments().parse_args()
+    
     main(config)

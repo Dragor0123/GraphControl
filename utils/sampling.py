@@ -8,6 +8,43 @@ from torch_sparse import SparseTensor
 from .transforms import obtain_attributes
 
 
+def _sample_neighbors(adj_t: SparseTensor, node_idx: torch.Tensor) -> torch.Tensor:
+    """Safely sample one neighbor for every node in node_idx.
+
+    Torch-sparse's built-in sample implementation uses `.view` on tensors that
+    are not always contiguous (e.g. when `node_idx` is an unsorted subset),
+    which raises a RuntimeError on some datasets. The helper below mimics the
+    original behavior while avoiding that view requirement and gracefully
+    handling isolated nodes by keeping the walk at the current node.
+    """
+    if node_idx.numel() == 0:
+        return node_idx
+
+    rowptr, col, _ = adj_t.csr()
+    rowcount = adj_t.storage.rowcount()
+
+    device = col.device
+    original_device = node_idx.device
+    node_idx = node_idx.to(torch.long).to(device)
+
+    counts = rowcount[node_idx]
+    starts = rowptr[node_idx]
+
+    next_nodes = node_idx.clone()
+    has_neighbors = counts > 0
+
+    if has_neighbors.any():
+        counts = counts[has_neighbors]
+        starts = starts[has_neighbors]
+        rand = torch.rand(counts.size(0), device=device)
+        rand.mul_(counts.to(rand.dtype))
+        rand = rand.to(torch.long)
+        rand.add_(starts)
+        next_nodes[has_neighbors] = col[rand]
+
+    return next_nodes.to(original_device)
+
+
 def add_remaining_selfloop_for_isolated_nodes(edge_index, num_nodes):
     num_nodes = max(maybe_num_nodes(edge_index), num_nodes)
     # only add self-loop on isolated nodes
@@ -54,26 +91,27 @@ class RWR:
         start_nodes = torch.randperm(node_num)[:graph_num]
         edge_index = graph.edge_index
 
-        # Create SparseTensor with proper handling for heterophilic graphs
-        self.adj_t = SparseTensor(row=edge_index[1], col=edge_index[0],
-                                  sparse_sizes=(node_num, node_num)).coalesce()
+        value = torch.arange(edge_index.size(1))
+        self.adj_t = SparseTensor(row=edge_index[0], col=edge_index[1],
+                                      value=value,
+                                      sparse_sizes=(node_num, node_num)).t()
 
         view1_list = []
         view2_list = []
 
         views_cnt = 1 if self.aligned else 2
         for view_idx in range(views_cnt):
-            current_nodes = start_nodes.clone().contiguous()
+            current_nodes = start_nodes.clone()
             history = start_nodes.clone().unsqueeze(0)
             signs = torch.ones(graph_num, dtype=torch.bool).unsqueeze(0)
             for i in range(self.walk_steps):
                 seed = torch.rand([graph_num])
-                nei = self.adj_t.sample(1, current_nodes.contiguous()).squeeze()
+                nei = _sample_neighbors(self.adj_t, current_nodes)
                 sign = seed < self.restart_ratio
                 nei[sign] = start_nodes[sign]
                 history = torch.cat((history, nei.unsqueeze(0)), dim=0)
                 signs = torch.cat((signs, sign.unsqueeze(0)), dim=0)
-                current_nodes = nei.contiguous()
+                current_nodes = nei
             history = history.T
             signs = signs.T
             
@@ -119,28 +157,27 @@ class RWR:
     
 def collect_subgraphs(selected_id, graph, walk_steps=20, restart_ratio=0.5):
     graph  = copy.deepcopy(graph) # modified on the copy
+    edge_index = graph.edge_index
     node_num = graph.x.shape[0]
-    edge_index = to_undirected(graph.edge_index)
-    edge_index = add_remaining_selfloop_for_isolated_nodes(edge_index, node_num)
-    graph.edge_index = edge_index
     start_nodes = selected_id # only sampling selected nodes as subgraphs
     graph_num = start_nodes.shape[0]
     
-    # Create SparseTensor with proper handling for heterophilic graphs
-    adj_t = SparseTensor(row=edge_index[1], col=edge_index[0],
-                         sparse_sizes=(node_num, node_num)).coalesce()
+    value = torch.arange(edge_index.size(1))
+    adj_t = SparseTensor(row=edge_index[0], col=edge_index[1],
+                                    value=value,
+                                    sparse_sizes=(node_num, node_num)).t()
     
-    current_nodes = start_nodes.clone().contiguous()
+    current_nodes = start_nodes.clone()
     history = start_nodes.clone().unsqueeze(0)
     signs = torch.ones(graph_num, dtype=torch.bool).unsqueeze(0)
     for i in range(walk_steps):
         seed = torch.rand([graph_num])
-        nei = adj_t.sample(1, current_nodes.contiguous()).squeeze()
+        nei = _sample_neighbors(adj_t, current_nodes)
         sign = seed < restart_ratio
         nei[sign] = start_nodes[sign]
         history = torch.cat((history, nei.unsqueeze(0)), dim=0)
         signs = torch.cat((signs, sign.unsqueeze(0)), dim=0)
-        current_nodes = nei.contiguous()
+        current_nodes = nei
     history = history.T
     signs = signs.T
     

@@ -6,9 +6,9 @@ import scipy
 
 from .normalize import similarity, get_laplacian_matrix
 
-def obtain_attributes(data, use_adj=False, threshold=0.1, num_dim=32, labels=None):
+def obtain_attributes(data, use_adj=False, threshold=0.1, num_dim=32):
     save_node_border = 30000
-
+        
     if use_adj:
         # to undirected and remove self-loop
         edges = to_undirected(data.edge_index)
@@ -16,30 +16,17 @@ def obtain_attributes(data, use_adj=False, threshold=0.1, num_dim=32, labels=Non
         tmp = to_dense_adj(edges)[0]
     else:
         tmp = similarity(data.x, data.x)
-
+        
         # discretize the similarity matrix by threshold
         tmp = torch.where(tmp>threshold, 1.0, 0.0)
 
-        # Filter heterophilic links: set to 0 if nodes have different labels
-        if labels is not None:
-            label_matrix = labels.unsqueeze(1) == labels.unsqueeze(0)  # True if same class
-            tmp = tmp * label_matrix.float()  # Keep only homophilic links
-
     tmp = get_laplacian_matrix(tmp)
     if tmp.shape[0] > save_node_border:
-        L, V = scipy.linalg.eigh(tmp.cpu().numpy())
+        L, V = scipy.linalg.eigh(tmp)
         L = torch.from_numpy(L)
         V = torch.from_numpy(V)
     else:
-        # Handle eigenvalue decomposition with error handling for ill-conditioned matrices
-        try:
-            L, V = torch.linalg.eigh(tmp) # much faster than torch.linalg.eig
-        except torch._C._LinAlgError:
-            # Fallback to scipy for ill-conditioned matrices (e.g., in few-shot settings)
-            import scipy.linalg
-            L, V = scipy.linalg.eigh(tmp.cpu().numpy())
-            L = torch.from_numpy(L)
-            V = torch.from_numpy(V)
+        L, V = torch.linalg.eigh(tmp) # much faster than torch.linalg.eig
     
     x = V[:, :num_dim].float()
     import sklearn.preprocessing as preprocessing
@@ -93,17 +80,8 @@ def process_attributes(data, use_adj=False, threshold=0.1, num_dim=32, soft=Fals
             # discretize the similarity matrix by threshold
             Adj = torch.where(Adj>threshold, 1.0, 0.0)
     Lap = get_laplacian_matrix(Adj)
-
-    # Handle eigenvalue decomposition with error handling for ill-conditioned matrices
-    try:
-        L, V = torch.linalg.eigh(Lap) # much faster than torch.linalg.eig
-    except torch._C._LinAlgError:
-        # Fallback to scipy for ill-conditioned matrices (e.g., in few-shot settings with small subgraphs)
-        import scipy.linalg
-        L_np, V_np = scipy.linalg.eigh(Lap.cpu().numpy())
-        L = torch.from_numpy(L_np).to(Lap.device)
-        V = torch.from_numpy(V_np).to(Lap.device)
-
+    
+    L, V = torch.linalg.eigh(Lap) # much faster than torch.linalg.eig, if this line triggers bugs please refer to https://github.com/pytorch/pytorch/issues/70122#issuecomment-1232766638
     L_sort, _ = torch.sort(L, descending=False)
     hist = torch.histc(L, bins=32, min=0, max=2)
     hist = hist.unsqueeze(0)
