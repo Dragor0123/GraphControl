@@ -13,15 +13,32 @@ def change_params_key(params):
     """
     Change GCC source parameters keys
     """
-    for key in list(params.keys()):
-        sp = key.split('.')
-        if len(sp) > 3 and sp[3] == 'apply_func':
-            sp[3] = 'nn'
-            str = '.'.join(sp)
-            params[str] = params[key]
-            params.pop(key)
-        if sp[0] == 'set2set':
-            params.pop(key)
+    converted = {}
+    for key, value in params.items():
+        if key.startswith('set2set'):
+            continue
+
+        new_key = key.replace('.apply_func.', '.nn.')
+
+        if new_key.startswith('gnn.ginlayers.'):
+            remainder = new_key[len('gnn.ginlayers.'):]
+            if '.' in remainder:
+                layer_idx, suffix = remainder.split('.', 1)
+                new_key = f'gnn.layers.{layer_idx}.conv.{suffix}'
+            else:
+                new_key = f'gnn.layers.{remainder}.conv'
+        elif new_key.startswith('gnn.batch_norms.'):
+            remainder = new_key[len('gnn.batch_norms.'):]
+            if '.' in remainder:
+                layer_idx, suffix = remainder.split('.', 1)
+                new_key = f'gnn.layers.{layer_idx}.norm.{suffix}'
+            else:
+                new_key = f'gnn.layers.{remainder}.norm'
+
+        converted[new_key] = value
+
+    params.clear()
+    params.update(converted)
 
 
 @register.model_register
