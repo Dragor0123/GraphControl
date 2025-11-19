@@ -1,12 +1,7 @@
-from typing import Any, Mapping
-import numpy as np
-import torch
+import copy
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GINConv
-from torch_geometric.nn import global_mean_pool, global_add_pool, global_max_pool
 from utils.register import register
-import copy
 from .gcc import GCC
 
 @register.model_register
@@ -17,25 +12,29 @@ class GCC_GraphControl(nn.Module):
         **kwargs
     ):
         super(GCC_GraphControl, self).__init__()
-        input_dim = kwargs['positional_embedding_size']
+        positional_dim = kwargs['positional_embedding_size']
         hidden_size = kwargs['node_hidden_dim']
         output_dim = kwargs['num_classes']
         
         self.encoder = GCC(**kwargs)
         self.trainable_copy = copy.deepcopy(self.encoder)
-        
-        self.zero_conv1 = torch.nn.Linear(input_dim, input_dim)     
-        self.zero_conv2 = torch.nn.Linear(hidden_size, hidden_size)
 
-        self.linear_classifier = torch.nn.Linear(hidden_size, output_dim)
+        self.hidden_size = hidden_size
+        self.node_input_dim = self.encoder.node_input_dim
 
-        with torch.no_grad():
-            self.zero_conv1.weight = torch.nn.Parameter(torch.zeros(input_dim, input_dim))
-            self.zero_conv1.bias = torch.nn.Parameter(torch.zeros(input_dim))
-            self.zero_conv2.weight = torch.nn.Parameter(torch.zeros(hidden_size, hidden_size))
-            self.zero_conv2.bias = torch.nn.Parameter(torch.zeros(hidden_size))
-        
-        self.prompt = torch.nn.Parameter(torch.normal(mean=0, std=0.01, size=(1, input_dim)))
+        self.cond_proj = nn.Linear(positional_dim, hidden_size)
+        self.cond_input_adapter = nn.Linear(hidden_size, self.node_input_dim)
+        num_layers = len(self.encoder.gnn.layers)
+        self.zero_layers = nn.ModuleList(
+            nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
+        )
+
+        self.linear_classifier = nn.Linear(hidden_size, output_dim)
+
+        self._zero_init_module(self.cond_proj)
+        self._zero_init_module(self.cond_input_adapter)
+        for layer in self.zero_layers:
+            self._zero_init_module(layer)
     
     def forward(self, x, edge_index, edge_weight=None, frozen=False, **kwargs):
         raise NotImplementedError('Please use --subsampling')
@@ -44,22 +43,46 @@ class GCC_GraphControl(nn.Module):
         self.linear_classifier.reset_parameters()
     
     def forward_subgraph(self, x, x_sim, edge_index, batch, root_n_id, edge_weight=None, frozen=False, **kwargs):
-        if frozen:
-            with torch.no_grad():
-                self.encoder.eval()
-                out = self.encoder.forward_subgraph(x, edge_index, batch, root_n_id)
-
-            x_down = self.zero_conv1(x_sim)
-            x_down = x_down + x
-            
-            # for simplicity, we use edge_index to calculate degrees
-            x_down = self.trainable_copy.forward_subgraph(x_down, edge_index, batch, root_n_id)
-            
-            x_down = self.zero_conv2(x_down)
-            
-            out = x_down + out
-        else:
+        if not frozen:
             raise NotImplementedError('Please freeze pre-trained models')
+
+        self.encoder.eval()
+
+        with torch.no_grad():
+            h_frozen = self.encoder.prepare_node_features(x, edge_index, root_n_id)
+
+        h_ctrl = self.trainable_copy.prepare_node_features(x, edge_index, root_n_id)
+        cond_hidden = self.cond_proj(x_sim)
+        cond_first_layer = self.cond_input_adapter(cond_hidden)
+
+        hidden_states = [h_frozen]
+        encoder_layers = self.encoder.gnn.layers
+        ctrl_layers = self.trainable_copy.gnn.layers
+
+        for layer_idx, (layer_frozen, layer_ctrl, zero_layer) in enumerate(
+            zip(encoder_layers, ctrl_layers, self.zero_layers)
+        ):
+            with torch.no_grad():
+                h_frozen = layer_frozen(h_frozen, edge_index)
+
+            if layer_idx == 0:
+                ctrl_input = h_ctrl + cond_first_layer
+            else:
+                ctrl_input = h_ctrl + cond_hidden
+            h_ctrl = layer_ctrl(ctrl_input, edge_index)
+
+            h_frozen = h_frozen + zero_layer(h_ctrl)
+            hidden_states.append(h_frozen)
+
+        out, _ = self.encoder.gnn.graph_readout(hidden_states, batch)
+        if self.encoder.norm:
+            out = F.normalize(out, p=2, dim=-1, eps=1e-5)
         
         x = self.linear_classifier(out)
         return x
+
+    @staticmethod
+    def _zero_init_module(module):
+        nn.init.zeros_(module.weight)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)

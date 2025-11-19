@@ -112,31 +112,20 @@ class GCC(nn.Module):
             nn.Linear(node_hidden_dim, output_dim),
         )
         self.norm = norm
+        self.node_input_dim = node_input_dim
+        self.positional_embedding_size = positional_embedding_size
+        self.degree_embedding_size = degree_embedding_size if degree_input else 0
     
     def forward(self, x, edge_index, edge_weight=None, frozen=False, **kwargs):
         raise NotImplementedError('Please use --subsampling')
-    
-    def forward_subgraph(self, x, edge_index, batch, root_n_id, edge_weight=None, frozen=False, **kwargs):
-        """Predict molecule labels
 
-        Parameters
-        ----------
-        g : DGLGraph
-            Input DGLGraph for molecule(s)
-        n_feat : tensor of dtype float32 and shape (B1, D1)
-            Node features. B1 for number of nodes and D1 for
-            the node feature size.
-        e_feat : tensor of dtype float32 and shape (B2, D2)
-            Edge features. B2 for number of edges and D2 for
-            the edge feature size.
-
-        Returns
-        -------
-        res : Predicted labels
+    def prepare_node_features(self, x, edge_index, root_n_id):
+        r"""
+        Build the per-node features consumed by the GNN layers. This mirrors the
+        preprocessing inside :meth:`forward_subgraph` so the logic can be reused
+        by other modules (e.g., GraphControl variants).
         """
-        # nfreq = g.ndata["nfreq"]
         if self.degree_input:
-            # device = g.ndata["seed"].device
             device = x.device
             degrees = torch_geometric.utils.degree(edge_index[0]).long().to(device)
             ego_indicator = torch.zeros(x.shape[0]).bool().to(device)
@@ -158,8 +147,28 @@ class GCC(nn.Module):
                 dim=-1,
             )
 
-        e_feat = None
+        return n_feat
+    
+    def forward_subgraph(self, x, edge_index, batch, root_n_id, edge_weight=None, frozen=False, **kwargs):
+        """Predict molecule labels
 
+        Parameters
+        ----------
+        g : DGLGraph
+            Input DGLGraph for molecule(s)
+        n_feat : tensor of dtype float32 and shape (B1, D1)
+            Node features. B1 for number of nodes and D1 for
+            the node feature size.
+        e_feat : tensor of dtype float32 and shape (B2, D2)
+            Edge features. B2 for number of edges and D2 for
+            the edge feature size.
+
+        Returns
+        -------
+        res : Predicted labels
+        """
+        # nfreq = g.ndata["nfreq"]
+        n_feat = self.prepare_node_features(x, edge_index, root_n_id)
         x, all_outputs = self.gnn(n_feat, edge_index, batch)
        
         if self.norm:
@@ -270,6 +279,28 @@ class MLP(nn.Module):
                 h = F.relu(self.batch_norms[i](self.linears[i](h)))
             return self.linears[-1](h)
 
+class GINLayerBlock(nn.Module):
+    """A single GIN layer with normalization and activation."""
+
+    def __init__(self, mlp, learn_eps, use_selayer):
+        super().__init__()
+        self.conv = GINConv(
+            ApplyNodeFunc(mlp, use_selayer),
+            0,
+            learn_eps,
+        )
+        hidden_dim = mlp.output_dim
+        self.norm = (
+            SELayer(hidden_dim, int(np.sqrt(hidden_dim)))
+            if use_selayer
+            else nn.BatchNorm1d(hidden_dim)
+        )
+
+    def forward(self, x, edge_index):
+        x = self.conv(x, edge_index)
+        x = self.norm(x)
+        x = F.relu(x)
+        return x
 
 class UnsupervisedGIN(nn.Module):
     """GIN model"""
@@ -316,9 +347,8 @@ class UnsupervisedGIN(nn.Module):
         self.num_layers = num_layers
         self.learn_eps = learn_eps
 
-        # List of MLPs
-        self.ginlayers = torch.nn.ModuleList()
-        self.batch_norms = torch.nn.ModuleList()
+        # List of GIN layers
+        self.layers = torch.nn.ModuleList()
 
         for layer in range(self.num_layers - 1):
             if layer == 0:
@@ -330,18 +360,7 @@ class UnsupervisedGIN(nn.Module):
                     num_mlp_layers, hidden_dim, hidden_dim, hidden_dim, use_selayer
                 )
 
-            self.ginlayers.append(
-                GINConv(
-                    ApplyNodeFunc(mlp, use_selayer),
-                    0,
-                    self.learn_eps,
-                )
-            )
-            self.batch_norms.append(
-                SELayer(hidden_dim, int(np.sqrt(hidden_dim)))
-                if use_selayer
-                else nn.BatchNorm1d(hidden_dim)
-            )
+            self.layers.append(GINLayerBlock(mlp, self.learn_eps, use_selayer))
 
         # Linear function for graph poolings of output of each layer
         # which maps the output of different layers into a prediction score
@@ -370,12 +389,14 @@ class UnsupervisedGIN(nn.Module):
         # list of hidden representation at each layer (including input)
         hidden_rep = [x]
         h = x
-        for i in range(self.num_layers - 1):
-            h = self.ginlayers[i](h, edge_index)
-            h = self.batch_norms[i](h)
-            h = F.relu(h)
+        for layer in self.layers:
+            h = layer(h, edge_index)
             hidden_rep.append(h)
 
+        score_over_layer, all_outputs = self.graph_readout(hidden_rep, batch)
+        return score_over_layer, all_outputs
+
+    def graph_readout(self, hidden_rep, batch):
         score_over_layer = 0
 
         # perform pooling over all nodes in each graph in every layer
@@ -386,4 +407,3 @@ class UnsupervisedGIN(nn.Module):
             score_over_layer += self.drop(self.linears_prediction[i](pooled_h))
 
         return score_over_layer, all_outputs[1:]
-
