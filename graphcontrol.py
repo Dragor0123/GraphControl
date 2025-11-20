@@ -11,6 +11,7 @@ from utils.transforms import process_attributes, obtain_attributes
 from models import load_model
 from datasets import NodeDataset
 from optimizers import create_optimizer
+import copy
 
 
 def preprocess(config, dataset_obj, device):
@@ -34,7 +35,7 @@ def preprocess(config, dataset_obj, device):
     return train_loader, test_loader
 
 
-def finetune(config, model, train_loader, device, full_x_sim, test_loader):
+def finetune(config, model, train_loader, device, full_x_sim, test_loader, full_x_original=None):
     # freeze the pre-trained encoder (left branch)
     for k, v in model.named_parameters():
         if 'encoder' in k:
@@ -64,16 +65,22 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
             sign_flip = torch.rand(data.x.size(1)).to(device)
             sign_flip[sign_flip>=0.5] = 1.0; sign_flip[sign_flip<0.5] = -1.0
             x = data.x * sign_flip.unsqueeze(0)
-            
+
             x_sim = full_x_sim[data.original_idx]
-            preds = model.forward_subgraph(x, x_sim, data.edge_index, data.batch, data.root_n_id, frozen=True)
+
+            # KHop model needs original features
+            if config.model == 'GCC_GraphControl_KHop':
+                x_orig = full_x_original[data.original_idx]
+                preds = model.forward_subgraph(x, x_orig, data.edge_index, data.batch, data.root_n_id, frozen=True)
+            else:
+                preds = model.forward_subgraph(x, x_sim, data.edge_index, data.batch, data.root_n_id, frozen=True)
                 
             loss = criterion(preds, data.y)
             loss.backward()
             optimizer.step()
     
         if epoch % eval_steps == 0:
-            acc = eval_subgraph(config, model, test_loader, device, full_x_sim)
+            acc = eval_subgraph(config, model, test_loader, device, full_x_sim, full_x_original)
             process_bar.set_postfix({"Epoch": epoch, "Accuracy": f"{acc:.4f}"})
             if best_acc < acc:
                 best_acc = acc
@@ -88,16 +95,22 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
 
 
 def main(config):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') 
-    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     dataset_obj = NodeDataset(config.dataset, n_seeds=config.seeds)
     dataset_obj.print_statistics()
-    
+
     # For large graph, we use cpu to preprocess it rather than gpu because of OOM problem.
     if dataset_obj.num_nodes < 30000:
         dataset_obj.to(device)
     x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold).to(device)
-    
+
+    # For KHop model, we need original features
+    if config.model == 'GCC_GraphControl_KHop':
+        x_original = copy.deepcopy(dataset_obj.data.x).to(device)
+    else:
+        x_original = None
+
     dataset_obj.to('cpu') # Otherwise the deepcopy will raise an error
     num_node_features = config.num_dim
 
@@ -121,7 +134,7 @@ def main(config):
         model = model.to(device)
 
         # finetuning model
-        best_acc = finetune(config, model, train_loader, device, x_sim, test_loader)
+        best_acc = finetune(config, model, train_loader, device, x_sim, test_loader, x_original)
         
         acc_list.append(best_acc)
         print(f'Seed: {seed}, Accuracy: {best_acc:.4f}')
@@ -130,9 +143,9 @@ def main(config):
     print(f"# final_acc: {final_acc:.4f}±{final_acc_std:.4f}")
 
 
-def eval_subgraph(config, model, test_loader, device, full_x_sim):
+def eval_subgraph(config, model, test_loader, device, full_x_sim, full_x_original=None):
     model.eval()
-    
+
     correct = 0
     total_num = 0
     for batch in test_loader:
@@ -140,7 +153,14 @@ def eval_subgraph(config, model, test_loader, device, full_x_sim):
         if not hasattr(batch, 'root_n_id'):
             batch.root_n_id = batch.root_n_index
         x_sim = full_x_sim[batch.original_idx]
-        preds = model.forward_subgraph(batch.x, x_sim, batch.edge_index, batch.batch, batch.root_n_id, frozen=True).argmax(dim=1)
+
+        # KHop model needs original features
+        if config.model == 'GCC_GraphControl_KHop':
+            x_orig = full_x_original[batch.original_idx]
+            preds = model.forward_subgraph(batch.x, x_orig, batch.edge_index, batch.batch, batch.root_n_id, frozen=True).argmax(dim=1)
+        else:
+            preds = model.forward_subgraph(batch.x, x_sim, batch.edge_index, batch.batch, batch.root_n_id, frozen=True).argmax(dim=1)
+
         correct += (preds == batch.y).sum().item()
         total_num += batch.y.shape[0]
     acc = correct / total_num

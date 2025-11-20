@@ -4,10 +4,12 @@ from .gcc import change_params_key
 
 
 def load_model(input_dim: int, output_dim: int, config):
-    if config.model in ['GCC', 'GCC_GraphControl']:
+    if config.model in ['GCC', 'GCC_GraphControl', 'GCC_GraphControl_KHop']:
         state_dict = torch.load('checkpoint/gcc.pth', map_location='cpu')
         opt = state_dict['opt']
-        model = register.models[config.model](
+
+        # Base model kwargs
+        model_kwargs = dict(
             positional_embedding_size=opt.positional_embedding_size,
             max_node_freq=opt.max_node_freq,
             max_edge_freq=opt.max_edge_freq,
@@ -23,15 +25,22 @@ def load_model(input_dim: int, output_dim: int, config):
             gnn_model=opt.model,
             norm=opt.norm,
             degree_input=True,
-            num_classes = output_dim
+            num_classes=output_dim
         )
+
+        # Add k-hop specific parameters
+        if config.model == 'GCC_GraphControl_KHop':
+            model_kwargs['khop_mode'] = config.khop_mode
+            model_kwargs['threshold'] = config.threshold
+
+        model = register.models[config.model](**model_kwargs)
         params = state_dict['model']
         change_params_key(params)
 
         if config.model == 'GCC':
             model.load_state_dict(params)
             return model
-        elif config.model == 'GCC_GraphControl':
+        elif config.model in ['GCC_GraphControl', 'GCC_GraphControl_KHop']:
             model.encoder.load_state_dict(params)
             model.trainable_copy.load_state_dict(params)
             return model
