@@ -4,7 +4,7 @@ from .gcc import change_params_key
 
 
 def load_model(input_dim: int, output_dim: int, config):
-    if config.model in ['GCC', 'GCC_GraphControl', 'GCC_GraphControl_KHop']:
+    if config.model in ['GCC', 'GCC_GraphControl', 'GCC_GraphControl_Propagation', 'GCC_GraphControl_EdgeDropout']:
         state_dict = torch.load('checkpoint/gcc.pth', map_location='cpu')
         opt = state_dict['opt']
 
@@ -28,10 +28,13 @@ def load_model(input_dim: int, output_dim: int, config):
             num_classes=output_dim
         )
 
-        # Add k-hop specific parameters
-        if config.model == 'GCC_GraphControl_KHop':
-            model_kwargs['khop_mode'] = config.khop_mode
+        # Add threshold for Propagation model
+        if config.model == 'GCC_GraphControl_Propagation':
             model_kwargs['threshold'] = config.threshold
+
+        # Add dropout rate for EdgeDropout model
+        if config.model == 'GCC_GraphControl_EdgeDropout':
+            model_kwargs['cond_dropout_rate'] = config.cond_dropout_rate
 
         model = register.models[config.model](**model_kwargs)
         params = state_dict['model']
@@ -40,7 +43,7 @@ def load_model(input_dim: int, output_dim: int, config):
         if config.model == 'GCC':
             model.load_state_dict(params)
             return model
-        elif config.model in ['GCC_GraphControl', 'GCC_GraphControl_KHop']:
+        elif config.model in ['GCC_GraphControl', 'GCC_GraphControl_Propagation', 'GCC_GraphControl_EdgeDropout']:
             model.encoder.load_state_dict(params)
             model.trainable_copy.load_state_dict(params)
             return model

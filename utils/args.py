@@ -15,9 +15,7 @@ class Arguments:
                                  choices=['relu', 'elu', 'hardtanh', 'leakyrelu', 'prelu', 'rrelu'])
         self.parser.add_argument('--use_bn', action='store_true', help="use BN or not")
         self.parser.add_argument('--model', type=str, help="model name", default='GCC_GraphControl',
-                                 choices=['GCC', 'GCC_GraphControl', 'GCC_GraphControl_KHop'])
-        self.parser.add_argument('--khop_mode', type=str, help="k-hop mode for GCC_GraphControl_KHop",
-                                 default='pure', choices=['pure', 'cumulative'])
+                                 choices=['GCC', 'GCC_GraphControl', 'GCC_GraphControl_Propagation', 'GCC_GraphControl_EdgeDropout'])
     
         # Training settings
         self.parser.add_argument('--optimizer', type=str, help="the kind of optimizer", default='adam', 
@@ -31,7 +29,8 @@ class Arguments:
         # Processing node attributes
         self.parser.add_argument('--use_adj', action='store_true', help="use eigen-vectors of adjacent matrix as node attributes")
         self.parser.add_argument('--threshold', type=float, help="the threshold for discreting similarity matrix", default=0.15)
-        self.parser.add_argument('--num_dim', type=int, help="the number of replaced node attributes", default=32)     
+        self.parser.add_argument('--num_dim', type=int, help="the number of replaced node attributes", default=32)
+        self.parser.add_argument('--cond_dropout_rate', type=float, help="dropout rate for condition augmentation", default=0.2)     
         # self.parser.add_argument('--ad_aug', action='store_true', help="adversarial augmentation")
         self.parser.add_argument('--restart', type=float, help="the restart ratio of random walking", default=0.3)
         self.parser.add_argument('--walk_steps', type=int, help="the number of random walk's steps", default=256)

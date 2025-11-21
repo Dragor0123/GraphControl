@@ -7,6 +7,33 @@ import sklearn.preprocessing as preprocessing
 
 from .normalize import similarity, get_laplacian_matrix
 
+def apply_edge_dropout_to_similarity(x_sim, dropout_rate=0.2):
+    """
+    Apply edge dropout to similarity matrix for condition augmentation.
+
+    Args:
+        x_sim: [N, num_dim] positional embedding from similarity matrix
+        dropout_rate: probability of dropping edges (default: 0.2)
+
+    Returns:
+        x_sim_aug: [N, num_dim] augmented positional embedding
+    """
+    # To apply edge dropout, we need to:
+    # 1. Reconstruct approximate similarity from PE (just add random noise)
+    # 2. Or directly apply dropout to PE dimensions
+
+    # Simple approach: apply dropout to PE dimensions during training
+    # This simulates the effect of edge dropout on the resulting PE
+    if dropout_rate > 0:
+        mask = torch.rand_like(x_sim) > dropout_rate
+        x_sim_aug = x_sim * mask.float()
+        # Renormalize to maintain similar scale
+        x_sim_aug = x_sim_aug * (1.0 / (1.0 - dropout_rate))
+    else:
+        x_sim_aug = x_sim
+
+    return x_sim_aug
+
 def obtain_attributes(data, use_adj=False, threshold=0.1, num_dim=32):
     save_node_border = 30000
         
@@ -104,125 +131,99 @@ def process_attributes(data, use_adj=False, threshold=0.1, num_dim=32, soft=Fals
     return data
 
 
-def compute_khop_condition_pe_pure(x, edge_index, num_nodes, k, num_dim=32, threshold=0.1):
+def precompute_propagated_features(x, edge_index, num_nodes, num_layers):
     """
-    Option A: Pure k-hop masking
-    S_k = A^k * (X @ X.T)
+    Precompute feature propagation: X, AX, A²X, ..., A^(num_layers-1)X
+
+    This computes propagated features once for the entire graph:
+    - Layer 0: X
+    - Layer 1: AX
+    - Layer 2: A²X
+    - Layer k: AᵏX
 
     Args:
-        x: [num_nodes, feature_dim] original node features
-        edge_index: [2, E] edge index
+        x: [N, d] original node features
+        edge_index: [2, E] edge indices
         num_nodes: number of nodes
-        k: hop distance (layer index)
-        num_dim: PE dimension
-        threshold: discretization threshold
+        num_layers: number of GNN layers
 
     Returns:
-        PE_k: [num_nodes, num_dim] k-hop condition PE
+        propagated_features: list of [N, d] tensors, length = num_layers
     """
     device = x.device
 
-    # Compute feature similarity: X @ X.T
-    S = similarity(x, x)
+    # Convert to sparse adjacency matrix
+    from torch_geometric.utils import to_scipy_sparse_matrix
+    import scipy.sparse as sp
 
-    # Compute A^k
-    if k == 0:
-        A_k = torch.eye(num_nodes, dtype=torch.float32, device=device)
-    else:
-        A = to_dense_adj(edge_index, max_num_nodes=num_nodes)[0]
-        A_k = torch.linalg.matrix_power(A, k) if k > 1 else A
+    adj_scipy = to_scipy_sparse_matrix(edge_index, num_nodes=num_nodes)
 
-    # Apply masking: S_k = A^k * S
-    S_k = A_k * S
+    # Normalize: D^(-1/2) A D^(-1/2) for better propagation
+    # Or use simple row normalization: D^(-1) A
+    row_sum = torch.tensor(adj_scipy.sum(axis=1)).squeeze()
+    row_sum[row_sum == 0] = 1  # Avoid division by zero
+    d_inv = 1.0 / row_sum
+    d_inv_mat = sp.diags(d_inv.cpu().numpy())
+    adj_normalized = d_inv_mat @ adj_scipy
+
+    # Convert to torch sparse tensor
+    adj_coo = adj_normalized.tocoo()
+    indices = torch.LongTensor([adj_coo.row, adj_coo.col]).to(device)
+    values = torch.FloatTensor(adj_coo.data).to(device)
+    adj_sparse = torch.sparse_coo_tensor(indices, values, (num_nodes, num_nodes))
+
+    # Propagate features
+    propagated = [x]  # Layer 0: original features
+    x_current = x.clone()
+
+    for k in range(1, num_layers):
+        x_current = torch.sparse.mm(adj_sparse, x_current)
+        propagated.append(x_current)
+
+    return propagated
+
+
+def compute_propagated_similarity_pe(x_propagated, threshold=0.1, num_dim=32):
+    """
+    Compute PE from propagated feature similarity: (AᵏX) @ (AᵏX).T
+
+    Args:
+        x_propagated: [N, d] propagated features for layer k
+        threshold: discretization threshold
+        num_dim: PE dimension
+
+    Returns:
+        PE: [N, num_dim] positional embedding
+    """
+    device = x_propagated.device
+
+    # Compute similarity: (AᵏX) @ (AᵏX).T
+    S = similarity(x_propagated, x_propagated)
 
     # Discretize
-    S_k = torch.where(S_k > threshold, 1.0, 0.0)
+    S = torch.where(S > threshold, 1.0, 0.0)
 
     # Compute Laplacian PE
-    L_k = get_laplacian_matrix(S_k)
+    L = get_laplacian_matrix(S)
 
     try:
-        eigen_vals, eigen_vecs = torch.linalg.eigh(L_k)
+        eigen_vals, eigen_vecs = torch.linalg.eigh(L)
     except RuntimeError:
-        L_k_np = L_k.cpu().numpy()
-        eigen_vals, eigen_vecs = scipy.linalg.eigh(L_k_np)
+        L_np = L.cpu().numpy()
+        eigen_vals, eigen_vecs = scipy.linalg.eigh(L_np)
         eigen_vals = torch.from_numpy(eigen_vals).to(device)
         eigen_vecs = torch.from_numpy(eigen_vecs).to(device)
 
     # Extract and normalize eigenvectors
     if eigen_vecs.shape[1] < num_dim:
-        PE_k = torch.nn.functional.pad(eigen_vecs, (0, num_dim - eigen_vecs.shape[1]))
+        PE = torch.nn.functional.pad(eigen_vecs, (0, num_dim - eigen_vecs.shape[1]))
     else:
-        PE_k = eigen_vecs[:, :num_dim]
+        PE = eigen_vecs[:, :num_dim]
 
-    PE_k = PE_k.float()
-    PE_k_np = preprocessing.normalize(PE_k.cpu().numpy(), norm="l2")
-    PE_k = torch.tensor(PE_k_np, dtype=torch.float32, device=device)
+    PE = PE.float()
+    PE_np = preprocessing.normalize(PE.cpu().numpy(), norm="l2")
+    PE = torch.tensor(PE_np, dtype=torch.float32, device=device)
 
-    return PE_k
+    return PE
 
 
-def compute_khop_condition_pe_cumulative(x, edge_index, num_nodes, k, num_dim=32, threshold=0.1):
-    """
-    Option B: Cumulative k-hop masking
-    S_k = (I + A + A^2 + ... + A^k) * (X @ X.T)
-
-    Args:
-        x: [num_nodes, feature_dim] original node features
-        edge_index: [2, E] edge index
-        num_nodes: number of nodes
-        k: maximum hop distance (layer index)
-        num_dim: PE dimension
-        threshold: discretization threshold
-
-    Returns:
-        PE_k: [num_nodes, num_dim] cumulative k-hop condition PE
-    """
-    device = x.device
-
-    # Compute feature similarity: X @ X.T
-    S = similarity(x, x)
-
-    # Compute I + A + A^2 + ... + A^k
-    A_cumulative = torch.eye(num_nodes, dtype=torch.float32, device=device)
-
-    if k > 0:
-        A = to_dense_adj(edge_index, max_num_nodes=num_nodes)[0]
-        A_i = A.clone()
-
-        for i in range(1, k + 1):
-            if i > 1:
-                A_i = torch.matmul(A_i, A)
-            A_cumulative = A_cumulative + A_i
-
-        # Binarize
-        A_cumulative = (A_cumulative > 0).float()
-
-    # Apply masking: S_k = A_cumulative * S
-    S_k = A_cumulative * S
-
-    # Discretize
-    S_k = torch.where(S_k > threshold, 1.0, 0.0)
-
-    # Compute Laplacian PE
-    L_k = get_laplacian_matrix(S_k)
-
-    try:
-        eigen_vals, eigen_vecs = torch.linalg.eigh(L_k)
-    except RuntimeError:
-        L_k_np = L_k.cpu().numpy()
-        eigen_vals, eigen_vecs = scipy.linalg.eigh(L_k_np)
-        eigen_vals = torch.from_numpy(eigen_vals).to(device)
-        eigen_vecs = torch.from_numpy(eigen_vecs).to(device)
-
-    # Extract and normalize eigenvectors
-    if eigen_vecs.shape[1] < num_dim:
-        PE_k = torch.nn.functional.pad(eigen_vecs, (0, num_dim - eigen_vecs.shape[1]))
-    else:
-        PE_k = eigen_vecs[:, :num_dim]
-
-    PE_k = PE_k.float()
-    PE_k_np = preprocessing.normalize(PE_k.cpu().numpy(), norm="l2")
-    PE_k = torch.tensor(PE_k_np, dtype=torch.float32, device=device)
-
-    return PE_k
