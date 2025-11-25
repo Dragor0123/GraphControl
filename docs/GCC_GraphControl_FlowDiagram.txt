@@ -1,0 +1,311 @@
+================================================================================
+  GCC_GraphControl Execution Flow Diagram
+  Model: Baseline Layerwise GraphControl
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. PREPROCESSING (graphcontrol.py:main)                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  Input: Graph Dataset (Cora_ML, Citeseer, etc.)
+    │
+    ▼
+  ┌──────────────────────────────────────────┐
+  │ obtain_attributes(data, threshold=0.17)  │  ← Compute X @ X.T similarity
+  │                                          │
+  │  1. S = X @ X.T                          │  ← Feature similarity matrix
+  │  2. S_discrete = (S > threshold) ? 1:0   │  ← Binarize with threshold
+  │  3. L = Laplacian(S_discrete)            │  ← Graph Laplacian
+  │  4. λ, V = eig(L)                        │  ← Eigendecomposition
+  │  5. x_sim = V[:, :32]                    │  ← Take first 32 eigenvectors
+  └──────────────────────────────────────────┘
+    │
+    ▼
+  x_sim: [N, 32]  ← Single global condition (same for ALL layers)
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 2. MODEL ARCHITECTURE (models/gcc_graphcontrol.py:GCC_GraphControl)        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────────┐
+  │ __init__() - Model Initialization                                │
+  │                                                                   │
+  │  ┌─────────────────────────────────┐                             │
+  │  │ Frozen Branch                   │                             │
+  │  │  • encoder = GCC (pretrained)   │  ← 5-layer GIN, frozen     │
+  │  │  • requires_grad = False        │                             │
+  │  └─────────────────────────────────┘                             │
+  │                                                                   │
+  │  ┌─────────────────────────────────┐                             │
+  │  │ Trainable Branch                │                             │
+  │  │  • trainable_copy = GCC         │  ← Deep copy of encoder    │
+  │  │  • requires_grad = True         │                             │
+  │  └─────────────────────────────────┘                             │
+  │                                                                   │
+  │  ┌─────────────────────────────────┐                             │
+  │  │ Condition Processing (SHARED)   │                             │
+  │  │  • cond_proj: [32 → 128]        │  ← Single projection       │
+  │  │  • cond_input_adapter: [128→32] │  ← For layer 0             │
+  │  │  • ZERO initialized              │                             │
+  │  └─────────────────────────────────┘                             │
+  │                                                                   │
+  │  ┌─────────────────────────────────┐                             │
+  │  │ Zero Convolutions               │                             │
+  │  │  • zero_layers[0~4]: [128→128]  │  ← 5 layers, ZERO init     │
+  │  └─────────────────────────────────┘                             │
+  │                                                                   │
+  │  ┌─────────────────────────────────┐                             │
+  │  │ Classifier                      │                             │
+  │  │  • linear_classifier: [128→C]   │  ← C = num_classes         │
+  │  └─────────────────────────────────┘                             │
+  └───────────────────────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 3. FORWARD PASS (forward_subgraph)                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  Input:
+    • x: [N_subgraph, 32]         ← Positional encoding (Laplacian PE)
+    • x_sim: [N_full, 32]         ← Global condition (entire graph)
+    • edge_index: [2, E_subgraph] ← Subgraph edges
+    • batch: [N_subgraph]         ← Batch assignment
+    • root_n_id: [B]              ← Root node IDs
+
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ Step 1: Process Condition (ONCE, shared by all layers)             │
+  └─────────────────────────────────────────────────────────────────────┘
+
+    x_sim[original_idx]  ← Extract condition for subgraph nodes
+       │
+       ▼
+    ┌──────────────────────┐
+    │ cond_proj(x_sim)     │  ← [N, 32] → [N, 128]
+    └──────────────────────┘
+       │
+       ├─────────────────────────┬──────────────────────────┐
+       │                         │                          │
+       ▼                         ▼                          ▼
+    cond_hidden            cond_first_layer          (used for layer 1~4)
+    [N, 128]                [N, 32]                   [N, 128]
+       │                         │
+       │                    ┌─────────────────────┐
+       │                    │ cond_input_adapter  │
+       │                    └─────────────────────┘
+       │                         │
+       │                         │
+       └─────────────────────────┴──────────────────────────┐
+                                                            │
+                                                      Reused for all layers
+
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ Step 2: Layer-wise Parallel Computation (L=0 to L=4)               │
+  └─────────────────────────────────────────────────────────────────────┘
+
+    ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃ FROZEN BRANCH (left)            TRAINABLE BRANCH (right)       ┃
+    ┃ ════════════════════             ═══════════════════════       ┃
+    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+  Layer 0:
+  ════════
+    h_frozen⁰ = encoder.prepare_node_features(x, edge_index, root_n_id)
+                          [N, 32] → [N, 32]
+         │
+         │ (frozen, no grad)
+         │
+         ▼
+    ┌─────────────────┐                  ┌──────────────────────────┐
+    │ encoder.layer_0 │                  │ h_ctrl⁰ = prepare(...)   │
+    │   (GIN layer)   │                  │                          │
+    └─────────────────┘                  └──────────────────────────┘
+         │                                         │
+         │                                         │ + cond_first_layer
+         │                                         │   [N, 32]
+         │                                         ▼
+         │                               ┌──────────────────────────┐
+         │                               │ trainable_copy.layer_0   │
+         │                               │   (GIN layer)            │
+         │                               └──────────────────────────┘
+         │                                         │
+         │                                         ▼
+         │                                     h_ctrl⁰ [N, 128]
+         │                                         │
+         │                                         ▼
+         │                               ┌──────────────────────────┐
+         │                               │  zero_layers[0]          │
+         │                               │  [128 → 128]             │
+         │                               └──────────────────────────┘
+         │                                         │
+         │  ◄──────────────────────────────────────┘
+         │           (inject)
+         ▼
+    h_frozen⁰ = h_frozen⁰ + zero_layers[0](h_ctrl⁰)
+         │
+         │
+    [saved to hidden_states[1]]
+
+
+  Layer 1:
+  ════════
+    h_frozen¹ (from prev layer)
+         │
+         │ (frozen, no grad)
+         │
+         ▼
+    ┌─────────────────┐                  ┌──────────────────────────┐
+    │ encoder.layer_1 │                  │ h_ctrl¹ (from prev)      │
+    │   (GIN layer)   │                  │                          │
+    └─────────────────┘                  └──────────────────────────┘
+         │                                         │
+         │                                         │ + cond_hidden
+         │                                         │   [N, 128]
+         │                                         ▼
+         │                               ┌──────────────────────────┐
+         │                               │ trainable_copy.layer_1   │
+         │                               │   (GIN layer)            │
+         │                               └──────────────────────────┘
+         │                                         │
+         │                                         ▼
+         │                                     h_ctrl¹ [N, 128]
+         │                                         │
+         │                                         ▼
+         │                               ┌──────────────────────────┐
+         │                               │  zero_layers[1]          │
+         │                               │  [128 → 128]             │
+         │                               └──────────────────────────┘
+         │                                         │
+         │  ◄──────────────────────────────────────┘
+         │           (inject)
+         ▼
+    h_frozen¹ = h_frozen¹ + zero_layers[1](h_ctrl¹)
+         │
+         │
+    [saved to hidden_states[2]]
+
+
+  Layer 2, 3, 4:
+  ══════════════
+    (Same pattern as Layer 1, using same cond_hidden [N, 128])
+
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ Step 3: Graph Readout & Classification                             │
+  └─────────────────────────────────────────────────────────────────────┘
+
+    hidden_states = [h_frozen⁰, h_frozen¹, ..., h_frozen⁴]
+         │
+         ▼
+    ┌──────────────────────────────────────┐
+    │ encoder.gnn.graph_readout()          │
+    │  (JK-style: concat all layers)       │
+    │  Uses hidden_states + batch          │
+    └──────────────────────────────────────┘
+         │
+         ▼
+    out [B, 128]  ← B = batch size
+         │
+         │ (optional normalization)
+         ▼
+    ┌──────────────────────────────────────┐
+    │ F.normalize(out, p=2, dim=-1)        │
+    └──────────────────────────────────────┘
+         │
+         ▼
+    ┌──────────────────────────────────────┐
+    │ linear_classifier(out)               │
+    │  [128 → C]                           │
+    └──────────────────────────────────────┘
+         │
+         ▼
+    logits [B, C]  ← Final class predictions
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 4. TRAINING LOOP (graphcontrol.py:finetune)                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  For each epoch:
+    │
+    ├─► For each batch in train_loader:
+    │     │
+    │     ├─► Sign flip augmentation: x = x * sign_flip
+    │     │
+    │     ├─► Extract x_sim for batch: x_sim = full_x_sim[data.original_idx]
+    │     │
+    │     ├─► Forward: preds = model.forward_subgraph(x, x_sim, ...)
+    │     │
+    │     ├─► Loss: CrossEntropyLoss(preds, labels)
+    │     │
+    │     └─► Backward & Update (only trainable_copy + zero_layers)
+    │
+    └─► Every 3 epochs: Evaluate on test set
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 5. KEY PROPERTIES                                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │ • Frozen encoder preserves pretrained knowledge                      │
+  │ • Trainable copy adapts to downstream task                           │
+  │ • Single condition (x_sim) shared by ALL layers                      │
+  │ • Single projection (cond_proj) shared by ALL layers                 │
+  │ • Zero initialization ensures gradual integration                    │
+  │ • Layer-wise injection via zero_layers[0~4]                          │
+  │ • ControlNet-inspired architecture                                   │
+  └───────────────────────────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 6. PARAMETER BREAKDOWN                                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────┬──────────────┬─────────────────────┐
+  │ Component                        │ Trainable?   │ Dimensions          │
+  ├──────────────────────────────────┼──────────────┼─────────────────────┤
+  │ encoder (frozen GIN)             │ NO           │ ~1M params          │
+  │ trainable_copy (GIN)             │ YES          │ ~1M params          │
+  │ cond_proj                        │ YES          │ [32 × 128]          │
+  │ cond_input_adapter               │ YES          │ [128 × 32]          │
+  │ zero_layers[0~4]                 │ YES          │ 5 × [128 × 128]     │
+  │ linear_classifier                │ YES          │ [128 × C]           │
+  └──────────────────────────────────┴──────────────┴─────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 7. DATA FLOW SUMMARY                                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  Graph Data (X, A)
+       │
+       ├──► Laplacian PE ──────────────────────────► x [N, 32]
+       │                                              │
+       └──► Similarity Matrix ────► Threshold ────► x_sim [N, 32]
+                (X @ X.T)           (> 0.17)          │
+                                                      │
+            ┌─────────────────────────────────────────┘
+            │
+            ▼
+       ┌─────────────────────────────────────────────────────┐
+       │ SHARED CONDITION PROCESSING                         │
+       │  cond_proj(x_sim) → cond_hidden [N, 128]           │
+       │  cond_input_adapter(cond_hidden) → [N, 32]         │
+       └─────────────────────────────────────────────────────┘
+            │
+            ├──────────┬──────────┬──────────┬──────────┬──────────┐
+            ▼          ▼          ▼          ▼          ▼          ▼
+         Layer 0    Layer 1    Layer 2    Layer 3    Layer 4    Readout
+           │          │          │          │          │          │
+           └──────────┴──────────┴──────────┴──────────┴──────────┘
+                                     │
+                                     ▼
+                              Predictions [B, C]
+
+
+================================================================================
+  End of Diagram
+================================================================================

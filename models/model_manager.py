@@ -4,7 +4,7 @@ from .gcc import change_params_key
 
 
 def load_model(input_dim: int, output_dim: int, config):
-    if config.model in ['GCC', 'GCC_GraphControl', 'GCC_GraphControl_Propagation', 'GCC_GraphControl_EdgeDropout']:
+    if config.model in ['GCC', 'GCC_GraphControl', 'GCC_GraphControl_Propagation', 'GCC_GraphControl_EdgeDropout', 'GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
         state_dict = torch.load('checkpoint/gcc.pth', map_location='cpu')
         opt = state_dict['opt']
 
@@ -43,7 +43,7 @@ def load_model(input_dim: int, output_dim: int, config):
         if config.model == 'GCC':
             model.load_state_dict(params)
             return model
-        elif config.model in ['GCC_GraphControl', 'GCC_GraphControl_Propagation', 'GCC_GraphControl_EdgeDropout']:
+        elif config.model in ['GCC_GraphControl', 'GCC_GraphControl_Propagation', 'GCC_GraphControl_EdgeDropout', 'GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
             model.encoder.load_state_dict(params)
             model.trainable_copy.load_state_dict(params)
             return model

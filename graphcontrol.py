@@ -7,7 +7,7 @@ import numpy as np
 from utils.random import reset_random_seed
 from utils.args import Arguments
 from utils.sampling import collect_subgraphs
-from utils.transforms import process_attributes, obtain_attributes
+from utils.transforms import process_attributes, obtain_attributes, precompute_khop_conditions_pure, precompute_khop_conditions_cumulative
 from models import load_model
 from datasets import NodeDataset
 from optimizers import create_optimizer
@@ -65,8 +65,14 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
             sign_flip[sign_flip>=0.5] = 1.0; sign_flip[sign_flip<0.5] = -1.0
             x = data.x * sign_flip.unsqueeze(0)
 
-            x_sim = full_x_sim[data.original_idx]
-            preds = model.forward_subgraph(x, x_sim, data.edge_index, data.batch, data.root_n_id, frozen=True)
+            # Compute condition based on model type
+            if config.model in ['GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
+                # Use precomputed k-hop conditions (indexed by original_idx)
+                x_sim_list = [x_sim_k[data.original_idx] for x_sim_k in full_x_sim]
+                preds = model.forward_subgraph(x, x_sim_list, data.edge_index, data.batch, data.root_n_id, frozen=True)
+            else:
+                x_sim = full_x_sim[data.original_idx]
+                preds = model.forward_subgraph(x, x_sim, data.edge_index, data.batch, data.root_n_id, frozen=True)
                 
             loss = criterion(preds, data.y)
             loss.backward()
@@ -96,7 +102,20 @@ def main(config):
     # For large graph, we use cpu to preprocess it rather than gpu because of OOM problem.
     if dataset_obj.num_nodes < 30000:
         dataset_obj.to(device)
-    x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold).to(device)
+
+    # Precompute conditions based on model type
+    if config.model == 'GCC_GraphControl_KHopPure':
+        print('Precomputing k-hop conditions (Pure)...')
+        x_sim = [x.to(device) for x in precompute_khop_conditions_pure(
+            dataset_obj.data, num_layers=5, threshold=config.threshold, num_dim=config.num_dim
+        )]
+    elif config.model == 'GCC_GraphControl_KHopCumulative':
+        print('Precomputing k-hop conditions (Cumulative)...')
+        x_sim = [x.to(device) for x in precompute_khop_conditions_cumulative(
+            dataset_obj.data, num_layers=5, threshold=config.threshold, num_dim=config.num_dim
+        )]
+    else:
+        x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold).to(device)
 
     dataset_obj.to('cpu') # Otherwise the deepcopy will raise an error
     num_node_features = config.num_dim
@@ -139,8 +158,15 @@ def eval_subgraph(config, model, test_loader, device, full_x_sim):
         batch = batch.to(device)
         if not hasattr(batch, 'root_n_id'):
             batch.root_n_id = batch.root_n_index
-        x_sim = full_x_sim[batch.original_idx]
-        preds = model.forward_subgraph(batch.x, x_sim, batch.edge_index, batch.batch, batch.root_n_id, frozen=True).argmax(dim=1)
+
+        # Compute condition based on model type
+        if config.model in ['GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
+            # Use precomputed k-hop conditions (indexed by original_idx)
+            x_sim_list = [x_sim_k[batch.original_idx] for x_sim_k in full_x_sim]
+            preds = model.forward_subgraph(batch.x, x_sim_list, batch.edge_index, batch.batch, batch.root_n_id, frozen=True).argmax(dim=1)
+        else:
+            x_sim = full_x_sim[batch.original_idx]
+            preds = model.forward_subgraph(batch.x, x_sim, batch.edge_index, batch.batch, batch.root_n_id, frozen=True).argmax(dim=1)
 
         correct += (preds == batch.y).sum().item()
         total_num += batch.y.shape[0]

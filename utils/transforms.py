@@ -131,6 +131,307 @@ def process_attributes(data, use_adj=False, threshold=0.1, num_dim=32, soft=Fals
     return data
 
 
+def precompute_khop_conditions_pure(data, num_layers=5, threshold=0.1, num_dim=32):
+    """
+    Precompute all k-hop conditions for the entire graph (Option A: Pure)
+
+    Args:
+        data: graph data with x and edge_index
+        num_layers: number of GNN layers (5 for GCC)
+        threshold: discretization threshold
+        num_dim: PE dimension
+
+    Returns:
+        List of [N, num_dim] tensors, one per layer
+    """
+    from torch_geometric.utils import to_scipy_sparse_matrix
+    import scipy.sparse as sp
+
+    device = data.x.device
+    num_nodes = data.x.size(0)
+
+    # Compute feature similarity once
+    S = similarity(data.x, data.x)
+
+    # Precompute adjacency matrix
+    adj_scipy = to_scipy_sparse_matrix(data.edge_index, num_nodes=num_nodes)
+
+    conditions = []
+
+    for k in range(num_layers):
+        if k == 0:
+            # Layer 0: just use feature similarity
+            S_masked = S
+        else:
+            # Compute A^k
+            adj_k = adj_scipy
+            for _ in range(k - 1):
+                adj_k = adj_k @ adj_scipy
+
+            # Convert to dense
+            adj_k_dense = torch.from_numpy(adj_k.toarray()).float().to(device)
+
+            # Mask: A^k ⊙ S
+            S_masked = adj_k_dense * S
+
+        # Discretize
+        S_discrete = torch.where(S_masked > threshold, 1.0, 0.0)
+
+        # Compute Laplacian PE
+        L = get_laplacian_matrix(S_discrete)
+
+        if num_nodes > 30000:
+            L_np = L.cpu().numpy()
+            eigen_vals, eigen_vecs = scipy.linalg.eigh(L_np)
+            eigen_vals = torch.from_numpy(eigen_vals).to(device)
+            eigen_vecs = torch.from_numpy(eigen_vecs).to(device)
+        else:
+            try:
+                eigen_vals, eigen_vecs = torch.linalg.eigh(L)
+            except RuntimeError:
+                L_np = L.cpu().numpy()
+                eigen_vals, eigen_vecs = scipy.linalg.eigh(L_np)
+                eigen_vals = torch.from_numpy(eigen_vals).to(device)
+                eigen_vecs = torch.from_numpy(eigen_vecs).to(device)
+
+        # Extract and normalize eigenvectors
+        if eigen_vecs.shape[1] < num_dim:
+            PE = torch.nn.functional.pad(eigen_vecs, (0, num_dim - eigen_vecs.shape[1]))
+        else:
+            PE = eigen_vecs[:, :num_dim]
+
+        PE = PE.float()
+        PE_np = preprocessing.normalize(PE.cpu().numpy(), norm="l2")
+        PE = torch.tensor(PE_np, dtype=torch.float32, device=device)
+
+        conditions.append(PE)
+
+    return conditions
+
+
+def precompute_khop_conditions_cumulative(data, num_layers=5, threshold=0.1, num_dim=32):
+    """
+    Precompute all k-hop conditions for the entire graph (Option B: Cumulative)
+
+    Args:
+        data: graph data with x and edge_index
+        num_layers: number of GNN layers (5 for GCC)
+        threshold: discretization threshold
+        num_dim: PE dimension
+
+    Returns:
+        List of [N, num_dim] tensors, one per layer
+    """
+    from torch_geometric.utils import to_scipy_sparse_matrix
+    import scipy.sparse as sp
+
+    device = data.x.device
+    num_nodes = data.x.size(0)
+
+    # Compute feature similarity once
+    S = similarity(data.x, data.x)
+
+    # Precompute adjacency matrix
+    adj_scipy = to_scipy_sparse_matrix(data.edge_index, num_nodes=num_nodes)
+
+    conditions = []
+
+    for k in range(num_layers):
+        if k == 0:
+            # Layer 0: just use feature similarity
+            S_masked = S
+        else:
+            # Compute I + A + A² + ... + A^k
+            cumulative_adj = sp.eye(num_nodes)
+            adj_power = sp.eye(num_nodes)
+
+            for i in range(1, k + 1):
+                adj_power = adj_power @ adj_scipy
+                cumulative_adj = cumulative_adj + adj_power
+
+            # Convert to dense
+            cumulative_adj_dense = torch.from_numpy(cumulative_adj.toarray()).float().to(device)
+
+            # Mask: (I + A + ... + A^k) ⊙ S
+            S_masked = (cumulative_adj_dense > 0).float() * S
+
+        # Discretize
+        S_discrete = torch.where(S_masked > threshold, 1.0, 0.0)
+
+        # Compute Laplacian PE
+        L = get_laplacian_matrix(S_discrete)
+
+        if num_nodes > 30000:
+            L_np = L.cpu().numpy()
+            eigen_vals, eigen_vecs = scipy.linalg.eigh(L_np)
+            eigen_vals = torch.from_numpy(eigen_vals).to(device)
+            eigen_vecs = torch.from_numpy(eigen_vecs).to(device)
+        else:
+            try:
+                eigen_vals, eigen_vecs = torch.linalg.eigh(L)
+            except RuntimeError:
+                L_np = L.cpu().numpy()
+                eigen_vals, eigen_vecs = scipy.linalg.eigh(L_np)
+                eigen_vals = torch.from_numpy(eigen_vals).to(device)
+                eigen_vecs = torch.from_numpy(eigen_vecs).to(device)
+
+        # Extract and normalize eigenvectors
+        if eigen_vecs.shape[1] < num_dim:
+            PE = torch.nn.functional.pad(eigen_vecs, (0, num_dim - eigen_vecs.shape[1]))
+        else:
+            PE = eigen_vecs[:, :num_dim]
+
+        PE = PE.float()
+        PE_np = preprocessing.normalize(PE.cpu().numpy(), norm="l2")
+        PE = torch.tensor(PE_np, dtype=torch.float32, device=device)
+
+        conditions.append(PE)
+
+    return conditions
+
+
+def compute_khop_condition_pe_pure(x, edge_index, num_nodes, k, threshold=0.1, num_dim=32):
+    """
+    Option A: Pure k-hop masking
+    Compute condition from A^k ⊙ (X @ X.T) - only k-hop neighbors
+
+    Args:
+        x: [N, d] node features
+        edge_index: [2, E] edge indices
+        num_nodes: number of nodes
+        k: hop distance (0 for X@X.T, 1 for 1-hop, etc.)
+        threshold: discretization threshold
+        num_dim: PE dimension
+
+    Returns:
+        PE: [N, num_dim] positional embedding
+    """
+    device = x.device
+
+    # Compute feature similarity
+    S = similarity(x, x)
+
+    if k == 0:
+        # Layer 0: just use feature similarity
+        S_masked = S
+    else:
+        # Compute A^k
+        from torch_geometric.utils import to_scipy_sparse_matrix
+        import scipy.sparse as sp
+
+        adj_scipy = to_scipy_sparse_matrix(edge_index, num_nodes=num_nodes)
+
+        # Compute A^k
+        adj_k = adj_scipy
+        for _ in range(k - 1):
+            adj_k = adj_k @ adj_scipy
+
+        # Convert to dense tensor
+        adj_k_dense = torch.from_numpy(adj_k.toarray()).float().to(device)
+
+        # Mask: A^k ⊙ S (only k-hop neighbors)
+        S_masked = adj_k_dense * S
+
+    # Discretize
+    S_discrete = torch.where(S_masked > threshold, 1.0, 0.0)
+
+    # Compute Laplacian PE
+    L = get_laplacian_matrix(S_discrete)
+
+    try:
+        eigen_vals, eigen_vecs = torch.linalg.eigh(L)
+    except RuntimeError:
+        L_np = L.cpu().numpy()
+        eigen_vals, eigen_vecs = scipy.linalg.eigh(L_np)
+        eigen_vals = torch.from_numpy(eigen_vals).to(device)
+        eigen_vecs = torch.from_numpy(eigen_vecs).to(device)
+
+    # Extract and normalize eigenvectors
+    if eigen_vecs.shape[1] < num_dim:
+        PE = torch.nn.functional.pad(eigen_vecs, (0, num_dim - eigen_vecs.shape[1]))
+    else:
+        PE = eigen_vecs[:, :num_dim]
+
+    PE = PE.float()
+    PE_np = preprocessing.normalize(PE.cpu().numpy(), norm="l2")
+    PE = torch.tensor(PE_np, dtype=torch.float32, device=device)
+
+    return PE
+
+
+def compute_khop_condition_pe_cumulative(x, edge_index, num_nodes, k, threshold=0.1, num_dim=32):
+    """
+    Option B: Cumulative k-hop masking
+    Compute condition from (I + A + A² + ... + A^k) ⊙ (X @ X.T)
+
+    Args:
+        x: [N, d] node features
+        edge_index: [2, E] edge indices
+        num_nodes: number of nodes
+        k: maximum hop distance
+        threshold: discretization threshold
+        num_dim: PE dimension
+
+    Returns:
+        PE: [N, num_dim] positional embedding
+    """
+    device = x.device
+
+    # Compute feature similarity
+    S = similarity(x, x)
+
+    if k == 0:
+        # Layer 0: just use feature similarity
+        S_masked = S
+    else:
+        # Compute I + A + A² + ... + A^k
+        from torch_geometric.utils import to_scipy_sparse_matrix
+        import scipy.sparse as sp
+
+        adj_scipy = to_scipy_sparse_matrix(edge_index, num_nodes=num_nodes)
+
+        # Initialize with I (identity)
+        cumulative_adj = sp.eye(num_nodes)
+
+        # Add A, A², ..., A^k
+        adj_power = sp.eye(num_nodes)
+        for i in range(1, k + 1):
+            adj_power = adj_power @ adj_scipy
+            cumulative_adj = cumulative_adj + adj_power
+
+        # Convert to dense tensor
+        cumulative_adj_dense = torch.from_numpy(cumulative_adj.toarray()).float().to(device)
+
+        # Mask: (I + A + ... + A^k) ⊙ S
+        S_masked = (cumulative_adj_dense > 0).float() * S
+
+    # Discretize
+    S_discrete = torch.where(S_masked > threshold, 1.0, 0.0)
+
+    # Compute Laplacian PE
+    L = get_laplacian_matrix(S_discrete)
+
+    try:
+        eigen_vals, eigen_vecs = torch.linalg.eigh(L)
+    except RuntimeError:
+        L_np = L.cpu().numpy()
+        eigen_vals, eigen_vecs = scipy.linalg.eigh(L_np)
+        eigen_vals = torch.from_numpy(eigen_vals).to(device)
+        eigen_vecs = torch.from_numpy(eigen_vecs).to(device)
+
+    # Extract and normalize eigenvectors
+    if eigen_vecs.shape[1] < num_dim:
+        PE = torch.nn.functional.pad(eigen_vecs, (0, num_dim - eigen_vecs.shape[1]))
+    else:
+        PE = eigen_vecs[:, :num_dim]
+
+    PE = PE.float()
+    PE_np = preprocessing.normalize(PE.cpu().numpy(), norm="l2")
+    PE = torch.tensor(PE_np, dtype=torch.float32, device=device)
+
+    return PE
+
+
 def precompute_propagated_features(x, edge_index, num_nodes, num_layers):
     """
     Precompute feature propagation: X, AX, A²X, ..., A^(num_layers-1)X
