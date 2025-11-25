@@ -27,15 +27,7 @@ def load_model(input_dim: int, output_dim: int, config):
             degree_input=True,
             num_classes=output_dim
         )
-
-        # Add threshold for Propagation model
-        if config.model == 'GCC_GraphControl_Propagation':
-            model_kwargs['threshold'] = config.threshold
-
-        # Add dropout rate for EdgeDropout model
-        if config.model == 'GCC_GraphControl_EdgeDropout':
-            model_kwargs['cond_dropout_rate'] = config.cond_dropout_rate
-
+        
         model = register.models[config.model](**model_kwargs)
         params = state_dict['model']
         change_params_key(params)
@@ -43,7 +35,7 @@ def load_model(input_dim: int, output_dim: int, config):
         if config.model == 'GCC':
             model.load_state_dict(params)
             return model
-        elif config.model in ['GCC_GraphControl', 'GCC_GraphControl_Propagation', 'GCC_GraphControl_EdgeDropout', 'GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
+        elif config.model in ['GCC_GraphControl', 'GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
             model.encoder.load_state_dict(params)
             model.trainable_copy.load_state_dict(params)
             return model
