@@ -34,20 +34,17 @@ def apply_edge_dropout_to_similarity(x_sim, dropout_rate=0.2):
 
     return x_sim_aug
 
-def obtain_attributes(data, use_adj=False, threshold=0.1, num_dim=32):
+def obtain_attributes(data, use_adj=False, threshold=0.1, num_dim=32, labels=None):
     save_node_border = 30000
         
-    if use_adj:
-        # to undirected and remove self-loop
-        edges = to_undirected(data.edge_index)
-        edges, _ = remove_self_loops(edges)
-        tmp = to_dense_adj(edges)[0]
-    else:
-        tmp = similarity(data.x, data.x)
-        
-        # discretize the similarity matrix by threshold
-        tmp = torch.where(tmp>threshold, 1.0, 0.0)
-
+    tmp = similarity(data.x, data.x)
+    # discretize the similarity matrix by threshold
+    tmp = torch.where(tmp>threshold, 1.0, 0.0)
+    
+    if labels is not None:
+        label_matrix = labels.unsqueeze(1) == labels.unsqueeze(0)
+        tmp = tmp * label_matrix.float()
+    
     tmp = get_laplacian_matrix(tmp)
     if tmp.shape[0] > save_node_border:
         L, V = scipy.linalg.eigh(tmp)
