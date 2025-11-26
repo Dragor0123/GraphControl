@@ -115,8 +115,7 @@ def main(config):
             dataset_obj.data, num_layers=5, threshold=config.threshold, num_dim=config.num_dim
         )]
     else:
-        x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold, labels=dataset_obj.data.y).to(device)
-        # x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold).to(device)
+        x_sim = obtain_attributes(dataset_obj.data, use_adj=False, threshold=config.threshold).to(device)
 
     dataset_obj.to('cpu') # Otherwise the deepcopy will raise an error
     num_node_features = config.num_dim
