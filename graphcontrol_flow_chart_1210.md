@@ -404,7 +404,8 @@ This document illustrates the execution flow of graphcontrol.py for two model va
                                  ▼
         ┌─────────────────────────────────────────────────┐
         │  5.4 Merge Branches via Zero-initialized Layer  │
-        │      h_frozen = h_frozen + zero_layer(h_ctrl)   │
+        │      zero_out = zero_layer(h_ctrl)              │
+        │      h_frozen = h_frozen + 0.01 * zero_out      │
         │      hidden_states.append(h_frozen)             │
         └────────────────────────┬────────────────────────┘
                                  │
@@ -529,7 +530,8 @@ This document illustrates the execution flow of graphcontrol.py for two model va
                                  ▼
         ┌─────────────────────────────────────────────────┐
         │  4.6 Merge Branches via Zero-initialized Layer  │
-        │      h_frozen = h_frozen + zero_layer(h_ctrl)   │
+        │      zero_out = zero_layer(h_ctrl)              │
+        │      h_frozen = h_frozen + 0.01 * zero_out      │
         │      hidden_states.append(h_frozen)             │
         └────────────────────────┬────────────────────────┘
                                  │
@@ -646,6 +648,8 @@ This document illustrates the execution flow of graphcontrol.py for two model va
 | Layer 0 Condition         | X @ X.T                        | X @ X.T (0-hop)                  |
 | Layer k Condition         | X @ X.T (same as layer 0)      | A^k ⊙ (X @ X.T) (k-hop only)     |
 | Condition Varies by Layer | ❌ No                          | ✅ Yes                           |
+| Residual Scale (zero_out) | `h_frozen += 0.01 * zero_out`  | `h_frozen += 0.01 * zero_out`    |
+| Control Branch Init       | cond_proj/cond_input/zero_layer zero-init | Same zero-init + fixed scale 0.01 |
 | Forward Call              | `(x, x_sim, ...)`              | `(x, x_sim_list, ...)`           |
 
 ---
