@@ -22,7 +22,7 @@ class Arguments:
                                  choices=['adam', 'sgd', 'adamw', 'nadam', 'radam'])
         self.parser.add_argument('--lr', type=float, help="learning rate", default=1e-3)
         self.parser.add_argument('--weight_decay', type=float, help="weight decay", default=5e-4)
-        self.parser.add_argument('--epochs', type=int, help="training epochs", default=200)
+        self.parser.add_argument('--epochs', type=int, help="training epochs", default=100)
         self.parser.add_argument('--batch_size', type=int, default=128)
         self.parser.add_argument('--finetune', action='store_true', help="Quickly find optim parameters")
         
@@ -32,7 +32,7 @@ class Arguments:
         self.parser.add_argument('--num_dim', type=int, help="the number of replaced node attributes", default=32)
         self.parser.add_argument('--cond_dropout_rate', type=float, help="dropout rate for condition augmentation", default=0.2)     
         # self.parser.add_argument('--ad_aug', action='store_true', help="adversarial augmentation")
-        self.parser.add_argument('--restart', type=float, help="the restart ratio of random walking", default=0.3)
+        self.parser.add_argument('--restart', type=float, help="the restart ratio of random walking", default=0.8) #0.3
         self.parser.add_argument('--walk_steps', type=int, help="the number of random walk's steps", default=256)
 
         # Node2vec config
