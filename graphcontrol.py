@@ -55,10 +55,12 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
     optimizer = create_optimizer(name=config.optimizer, parameters=params, lr=config.lr, weight_decay=config.weight_decay)
     criterion = torch.nn.CrossEntropyLoss()
     process_bar = tqdm(range(config.epochs))
+    log_interval = config.log_interval if getattr(config, "log_norms", False) else None
+    norm_logs = [] if log_interval is not None else None
 
     for epoch in process_bar:
         epoch_accum = None
-        if epoch % log_interval == 0:
+        if log_interval is not None and epoch % log_interval == 0:
             epoch_accum = [
                 {
                     "h_frozen_norm_sum": 0.0,
@@ -115,7 +117,8 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
                     "ratio_zero_to_frozen": layer_data["ratio_zero_to_frozen_sum"] / cnt,
                     "batch_count": cnt
                 })
-            norm_logs.append(epoch_entry)
+            if norm_logs is not None:
+                norm_logs.append(epoch_entry)
     
         if epoch % eval_steps == 0:
             acc = eval_subgraph(config, model, test_loader, device, full_x_sim)
@@ -183,21 +186,22 @@ def main(config):
         
         acc_list.append(best_acc)
         print(f'Seed: {seed}, Accuracy: {best_acc:.4f}')
-        log_dir = os.path.join('results', 'norm_logs')
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, f"{config.dataset}_{config.model}_seed{seed}.json")
-        with open(log_path, 'w') as f:
-            json.dump(
-                {
-                    "dataset": config.dataset,
-                    "model": config.model,
-                    "seed": seed,
-                    "log_interval": 5,
-                    "entries": norm_logs
-                },
-                f,
-                indent=2
-            )
+        if getattr(config, "log_norms", False) and norm_logs is not None:
+            log_dir = os.path.join('results', 'norm_logs')
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, f"{config.dataset}_{config.model}_seed{seed}.json")
+            with open(log_path, 'w') as f:
+                json.dump(
+                    {
+                        "dataset": config.dataset,
+                        "model": config.model,
+                        "seed": seed,
+                        "log_interval": config.log_interval,
+                        "entries": norm_logs
+                    },
+                    f,
+                    indent=2
+                )
 
     final_acc, final_acc_std = np.mean(acc_list), np.std(acc_list)
     print(f"# final_acc: {final_acc:.4f}±{final_acc_std:.4f}")

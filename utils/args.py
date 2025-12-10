@@ -40,6 +40,10 @@ class Arguments:
         self.parser.add_argument('--walk_length', type=int, default=50, help="Walk length for node2vec")
         self.parser.add_argument('--context_size', type=int, default=10, help="Context size for node2vec")
         self.parser.add_argument('--walk_per_nodes', type=int, default=10, help="Walk per nodes for node2vec")
+
+        # Logging
+        self.parser.add_argument('--log_norms', action='store_true', help="Enable norm logging for h_frozen/h_ctrl/condition vectors")
+        self.parser.add_argument('--log_interval', type=int, default=5, help="Epoch interval for norm logging")
         
     def parse_args(self):
         return self.parser.parse_args()
