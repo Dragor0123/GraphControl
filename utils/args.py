@@ -44,6 +44,33 @@ class Arguments:
         # Logging
         self.parser.add_argument('--log_norms', action='store_true', help="Enable norm logging for h_frozen/h_ctrl/condition vectors")
         self.parser.add_argument('--log_interval', type=int, default=5, help="Epoch interval for norm logging")
+        self.parser.add_argument(
+            '--ctrl_norm_type',
+            type=str,
+            default='none',
+            choices=['none', 'layernorm', 'layernorm_first'],
+            help='Normalization type for GraphControl zero branch (none, layernorm, layernorm_first)'
+        )
+        # Condition selection
+        self.parser.add_argument(
+            '--cond_type',
+            type=str,
+            default='feature',
+            choices=['feature', 's1_2hop'],
+            help='Condition graph type: feature similarity (default) or S1 2-hop structural'
+        )
+        self.parser.add_argument(
+            '--two_hop_threshold',
+            type=float,
+            default=0.0,
+            help='Threshold for S1 2-hop condition; keep entries >= threshold (0 to disable)'
+        )
+        self.parser.add_argument(
+            '--two_hop_topk',
+            type=int,
+            default=0,
+            help='Top-k neighbors per node for S1 2-hop condition (0 to disable)'
+        )
         
     def parse_args(self):
         return self.parser.parse_args()

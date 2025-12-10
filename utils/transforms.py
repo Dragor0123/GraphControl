@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch
 import scipy
 import sklearn.preprocessing as preprocessing
+import numpy as np
 
 from .normalize import similarity, get_laplacian_matrix
 
@@ -521,3 +522,100 @@ def compute_propagated_similarity_pe(x_propagated, threshold=0.1, num_dim=32):
     return PE
 
 
+def build_two_hop_condition_pe(data, num_dim=32, two_hop_threshold=0.0, two_hop_topk=0, remove_one_hop=True):
+    """
+    Build positional embeddings from pure 2-hop structural adjacency (A^2) for S1 condition.
+
+    Steps:
+      1) Build sparse adjacency with self-loops (consistent with typical GNN usage).
+      2) Compute A^2.
+      3) Optionally remove 1-hop edges and self-loops to keep pure 2-hop structure.
+      4) Optional thresholding and top-k pruning.
+      5) Row-normalize and compute Laplacian eigenvectors.
+
+    Returns:
+      torch.Tensor [N, num_dim] positional embedding (L2-normalized).
+    """
+    from torch_geometric.utils import to_scipy_sparse_matrix, add_self_loops
+    import scipy.sparse as sp
+
+    num_nodes = data.x.size(0)
+    device = data.x.device
+
+    # 1) Build adjacency with self-loops
+    edge_index_with_loops, _ = add_self_loops(data.edge_index, num_nodes=num_nodes)
+    A = to_scipy_sparse_matrix(edge_index_with_loops, num_nodes=num_nodes).tocsr()
+
+    # 2) Compute A^2
+    A2 = A @ A
+
+    # Binary views for masking
+    A_bin = (A > 0).astype(np.int64)
+    A2_bin = (A2 > 0).astype(np.int64)
+
+    # 3) Remove 1-hop edges (pure 2-hop) and self-loops
+    if remove_one_hop:
+        A2_bin = A2_bin.multiply((A_bin == 0))
+    A2_bin.setdiag(0)
+    A2_bin.eliminate_zeros()
+
+    # Use weighted version based on counts for threshold/topk
+    A2_val = A2.multiply(A2_bin)  # keep structure mask
+
+    # 4) Thresholding
+    if two_hop_threshold > 0.0:
+        A2_val = A2_val.multiply(A2_val >= two_hop_threshold)
+        A2_val.eliminate_zeros()
+
+    # 4b) Top-k per row
+    if two_hop_topk > 0:
+        A2_val = _row_topk_csr(A2_val, k=two_hop_topk)
+
+    # 5) Row-normalize
+    row_sum = np.array(A2_val.sum(axis=1)).flatten()
+    row_sum[row_sum == 0] = 1.0
+    inv_row = 1.0 / row_sum
+    D_inv = sp.diags(inv_row)
+    C_norm = D_inv @ A2_val  # row-normalized
+
+    # Convert to torch dense adjacency
+    C_dense = torch.from_numpy(C_norm.toarray()).float().to(device)
+    L = get_laplacian_matrix(C_dense)
+
+    # Eigen-decomposition
+    try:
+        eigen_vals, eigen_vecs = torch.linalg.eigh(L)
+    except RuntimeError:
+        L_np = L.cpu().numpy()
+        eigen_vals, eigen_vecs = scipy.linalg.eigh(L_np)
+        eigen_vecs = torch.from_numpy(eigen_vecs).to(device)
+
+    # Extract and normalize eigenvectors
+    if eigen_vecs.shape[1] < num_dim:
+        PE = torch.nn.functional.pad(eigen_vecs, (0, num_dim - eigen_vecs.shape[1]))
+    else:
+        PE = eigen_vecs[:, :num_dim]
+
+    PE = PE.float()
+    PE_np = preprocessing.normalize(PE.cpu().numpy(), norm="l2")
+    PE = torch.tensor(PE_np, dtype=torch.float32, device=device)
+    return PE
+
+
+def _row_topk_csr(mat_csr, k):
+    """
+    Keep top-k entries per row for a CSR sparse matrix.
+    """
+    import scipy.sparse as sp
+    mat_csr = mat_csr.tocsr()
+    rows, cols, data = [], [], []
+    for i in range(mat_csr.shape[0]):
+        row_data = mat_csr.data[mat_csr.indptr[i]:mat_csr.indptr[i+1]]
+        row_idx = mat_csr.indices[mat_csr.indptr[i]:mat_csr.indptr[i+1]]
+        if row_data.size == 0:
+            continue
+        topk_idx = np.argsort(-row_data)[:k]
+        rows.extend([i] * len(topk_idx))
+        cols.extend(row_idx[topk_idx])
+        data.extend(row_data[topk_idx])
+    return sp.csr_matrix((data, (rows, cols)), shape=mat_csr.shape)

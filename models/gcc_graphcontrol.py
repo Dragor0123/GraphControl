@@ -14,6 +14,10 @@ class GCC_GraphControl(nn.Module):
         **kwargs
     ):
         super(GCC_GraphControl, self).__init__()
+        self.ctrl_norm_type = kwargs.pop('ctrl_norm_type', 'none')
+        self.cond_type = kwargs.pop('cond_type', 'feature')
+        self.two_hop_threshold = kwargs.pop('two_hop_threshold', 0.0)
+        self.two_hop_topk = kwargs.pop('two_hop_topk', 0)
         positional_dim = kwargs['positional_embedding_size']
         hidden_size = kwargs['node_hidden_dim']
         output_dim = kwargs['num_classes']
@@ -127,6 +131,10 @@ class GCC_GraphControl_KHopPure(nn.Module):
 
     def __init__(self, **kwargs):
         super(GCC_GraphControl_KHopPure, self).__init__()
+        self.ctrl_norm_type = kwargs.pop('ctrl_norm_type', 'none')
+        self.cond_type = kwargs.pop('cond_type', 'feature')
+        self.two_hop_threshold = kwargs.pop('two_hop_threshold', 0.0)
+        self.two_hop_topk = kwargs.pop('two_hop_topk', 0)
         positional_dim = kwargs['positional_embedding_size']
         hidden_size = kwargs['node_hidden_dim']
         output_dim = kwargs['num_classes']
@@ -202,6 +210,10 @@ class GCC_GraphControl_KHopPure(nn.Module):
 
             h_ctrl = layer_ctrl(ctrl_input, edge_index)
             zero_out = zero_layer(h_ctrl)
+            if self.ctrl_norm_type == 'layernorm' and self.ctrl_layernorms is not None:
+                zero_out = self.ctrl_layernorms[layer_idx](zero_out)
+            elif self.ctrl_norm_type == 'layernorm_first' and layer_idx == 0 and self.ctrl_layernorm_first is not None:
+                zero_out = self.ctrl_layernorm_first(zero_out)
             scaled_zero = self.residual_scale * zero_out
 
             if log_accumulator is not None:
@@ -252,6 +264,10 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
 
     def __init__(self, **kwargs):
         super(GCC_GraphControl_KHopCumulative, self).__init__()
+        self.ctrl_norm_type = kwargs.pop('ctrl_norm_type', 'none')
+        self.cond_type = kwargs.pop('cond_type', 'feature')
+        self.two_hop_threshold = kwargs.pop('two_hop_threshold', 0.0)
+        self.two_hop_topk = kwargs.pop('two_hop_topk', 0)
         positional_dim = kwargs['positional_embedding_size']
         hidden_size = kwargs['node_hidden_dim']
         output_dim = kwargs['num_classes']
@@ -272,6 +288,19 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
             nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
         ])
         self.residual_scale = 0.01
+
+        # Control normalization config
+        if self.ctrl_norm_type == 'layernorm':
+            self.ctrl_layernorms = nn.ModuleList(
+                nn.LayerNorm(hidden_size) for _ in range(num_layers)
+            )
+            self.ctrl_layernorm_first = None
+        elif self.ctrl_norm_type == 'layernorm_first':
+            self.ctrl_layernorm_first = nn.LayerNorm(hidden_size)
+            self.ctrl_layernorms = None
+        else:
+            self.ctrl_layernorms = None
+            self.ctrl_layernorm_first = None
 
         self.linear_classifier = nn.Linear(hidden_size, output_dim)
 

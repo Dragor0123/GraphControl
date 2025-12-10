@@ -9,7 +9,13 @@ import numpy as np
 from utils.random import reset_random_seed
 from utils.args import Arguments
 from utils.sampling import collect_subgraphs
-from utils.transforms import process_attributes, obtain_attributes, precompute_khop_conditions_pure, precompute_khop_conditions_cumulative
+from utils.transforms import (
+    process_attributes,
+    obtain_attributes,
+    precompute_khop_conditions_pure,
+    precompute_khop_conditions_cumulative,
+    build_two_hop_condition_pe,
+)
 from models import load_model
 from datasets import NodeDataset
 from optimizers import create_optimizer
@@ -148,7 +154,21 @@ def main(config):
         dataset_obj.to(device)
 
     # Precompute conditions based on model type
-    if config.model == 'GCC_GraphControl_KHopPure':
+    if getattr(config, "cond_type", "feature") == "s1_2hop":
+        print('Precomputing S1 2-hop condition...')
+        two_hop_pe = build_two_hop_condition_pe(
+            dataset_obj.data,
+            num_dim=config.num_dim,
+            two_hop_threshold=config.two_hop_threshold,
+            two_hop_topk=config.two_hop_topk,
+            remove_one_hop=True
+        ).to(device)
+        if config.model in ['GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
+            # Use the same 2-hop condition for all layers
+            x_sim = [two_hop_pe for _ in range(5)]
+        else:
+            x_sim = two_hop_pe
+    elif config.model == 'GCC_GraphControl_KHopPure':
         print('Precomputing k-hop conditions (Pure)...')
         x_sim = [x.to(device) for x in precompute_khop_conditions_pure(
             dataset_obj.data, num_layers=5, threshold=config.threshold, num_dim=config.num_dim
