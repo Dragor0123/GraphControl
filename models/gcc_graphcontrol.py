@@ -44,7 +44,7 @@ class GCC_GraphControl(nn.Module):
     def reset_classifier(self):
         self.linear_classifier.reset_parameters()
 
-    def forward_subgraph(self, x, x_sim, edge_index, batch, root_n_id, edge_weight=None, frozen=False, **kwargs):
+    def forward_subgraph(self, x, x_sim, edge_index, batch, root_n_id, edge_weight=None, frozen=False, log_accumulator=None, **kwargs):
         if not frozen:
             raise NotImplementedError('Please freeze pre-trained models')
 
@@ -73,7 +73,28 @@ class GCC_GraphControl(nn.Module):
                 ctrl_input = h_ctrl + cond_hidden
             h_ctrl = layer_ctrl(ctrl_input, edge_index)
 
-            h_frozen = h_frozen + zero_layer(h_ctrl)
+            zero_out = zero_layer(h_ctrl)
+
+            if log_accumulator is not None:
+                layer_log = log_accumulator["layers"][layer_idx]
+                frozen_norm = torch.norm(h_frozen.detach(), dim=1).mean().item()
+                ctrl_norm = torch.norm(h_ctrl.detach(), dim=1).mean().item()
+                cond_hidden_norm = torch.norm(cond_hidden.detach(), dim=1).mean().item()
+                cond_input_norm = torch.norm(cond_first_layer.detach(), dim=1).mean().item() if layer_idx == 0 else None
+                zero_out_norm = torch.norm(zero_out.detach(), dim=1).mean().item()
+                ratio = zero_out_norm / (frozen_norm + 1e-12)
+
+                layer_log["h_frozen_norm_sum"] += frozen_norm
+                layer_log["h_ctrl_norm_sum"] += ctrl_norm
+                layer_log["cond_hidden_norm_sum"] += cond_hidden_norm
+                if cond_input_norm is not None:
+                    layer_log["cond_input_norm_sum"] += cond_input_norm
+                    layer_log["cond_input_count"] += 1
+                layer_log["zero_out_norm_sum"] += zero_out_norm
+                layer_log["ratio_zero_to_frozen_sum"] += ratio
+                layer_log["count"] += 1
+
+            h_frozen = h_frozen + zero_out
             hidden_states.append(h_frozen)
 
         out, _ = self.encoder.gnn.graph_readout(hidden_states, batch)
@@ -134,7 +155,7 @@ class GCC_GraphControl_KHopPure(nn.Module):
     def reset_classifier(self):
         self.linear_classifier.reset_parameters()
 
-    def forward_subgraph(self, x, x_sim_list, edge_index, batch, root_n_id, edge_weight=None, frozen=False, **kwargs):
+    def forward_subgraph(self, x, x_sim_list, edge_index, batch, root_n_id, edge_weight=None, frozen=False, log_accumulator=None, **kwargs):
         """
         Args:
             x: Positional embedding
@@ -174,7 +195,28 @@ class GCC_GraphControl_KHopPure(nn.Module):
                 ctrl_input = h_ctrl + cond_hidden
 
             h_ctrl = layer_ctrl(ctrl_input, edge_index)
-            h_frozen = h_frozen + zero_layer(h_ctrl)
+            zero_out = zero_layer(h_ctrl)
+
+            if log_accumulator is not None:
+                layer_log = log_accumulator["layers"][layer_idx]
+                frozen_norm = torch.norm(h_frozen.detach(), dim=1).mean().item()
+                ctrl_norm = torch.norm(h_ctrl.detach(), dim=1).mean().item()
+                cond_hidden_norm = torch.norm(cond_hidden.detach(), dim=1).mean().item()
+                cond_input_norm = torch.norm(cond_first_layer.detach(), dim=1).mean().item() if layer_idx == 0 else None
+                zero_out_norm = torch.norm(zero_out.detach(), dim=1).mean().item()
+                ratio = zero_out_norm / (frozen_norm + 1e-12)
+
+                layer_log["h_frozen_norm_sum"] += frozen_norm
+                layer_log["h_ctrl_norm_sum"] += ctrl_norm
+                layer_log["cond_hidden_norm_sum"] += cond_hidden_norm
+                if cond_input_norm is not None:
+                    layer_log["cond_input_norm_sum"] += cond_input_norm
+                    layer_log["cond_input_count"] += 1
+                layer_log["zero_out_norm_sum"] += zero_out_norm
+                layer_log["ratio_zero_to_frozen_sum"] += ratio
+                layer_log["count"] += 1
+
+            h_frozen = h_frozen + zero_out
             hidden_states.append(h_frozen)
 
         out, _ = self.encoder.gnn.graph_readout(hidden_states, batch)
@@ -235,7 +277,7 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
     def reset_classifier(self):
         self.linear_classifier.reset_parameters()
 
-    def forward_subgraph(self, x, x_sim_list, edge_index, batch, root_n_id, edge_weight=None, frozen=False, **kwargs):
+    def forward_subgraph(self, x, x_sim_list, edge_index, batch, root_n_id, edge_weight=None, frozen=False, log_accumulator=None, **kwargs):
         """
         Args:
             x: Positional embedding
@@ -275,7 +317,28 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
                 ctrl_input = h_ctrl + cond_hidden
 
             h_ctrl = layer_ctrl(ctrl_input, edge_index)
-            h_frozen = h_frozen + zero_layer(h_ctrl)
+            zero_out = zero_layer(h_ctrl)
+
+            if log_accumulator is not None:
+                layer_log = log_accumulator["layers"][layer_idx]
+                frozen_norm = torch.norm(h_frozen.detach(), dim=1).mean().item()
+                ctrl_norm = torch.norm(h_ctrl.detach(), dim=1).mean().item()
+                cond_hidden_norm = torch.norm(cond_hidden.detach(), dim=1).mean().item()
+                cond_input_norm = torch.norm(cond_first_layer.detach(), dim=1).mean().item() if layer_idx == 0 else None
+                zero_out_norm = torch.norm(zero_out.detach(), dim=1).mean().item()
+                ratio = zero_out_norm / (frozen_norm + 1e-12)
+
+                layer_log["h_frozen_norm_sum"] += frozen_norm
+                layer_log["h_ctrl_norm_sum"] += ctrl_norm
+                layer_log["cond_hidden_norm_sum"] += cond_hidden_norm
+                if cond_input_norm is not None:
+                    layer_log["cond_input_norm_sum"] += cond_input_norm
+                    layer_log["cond_input_count"] += 1
+                layer_log["zero_out_norm_sum"] += zero_out_norm
+                layer_log["ratio_zero_to_frozen_sum"] += ratio
+                layer_log["count"] += 1
+
+            h_frozen = h_frozen + zero_out
             hidden_states.append(h_frozen)
 
         out, _ = self.encoder.gnn.graph_readout(hidden_states, batch)
@@ -290,4 +353,3 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
         nn.init.zeros_(module.weight)
         if module.bias is not None:
             nn.init.zeros_(module.bias)
-

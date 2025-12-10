@@ -1,4 +1,6 @@
 import torch
+import json
+import os
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 import numpy as np
@@ -45,6 +47,9 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
     patience = 15
     count = 0
     best_acc = 0
+    log_interval = 5
+    num_layers = len(model.encoder.gnn.layers)
+    norm_logs = []
 
     params  = filter(lambda p: p.requires_grad, model.parameters())
     optimizer = create_optimizer(name=config.optimizer, parameters=params, lr=config.lr, weight_decay=config.weight_decay)
@@ -52,6 +57,22 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
     process_bar = tqdm(range(config.epochs))
 
     for epoch in process_bar:
+        epoch_accum = None
+        if epoch % log_interval == 0:
+            epoch_accum = [
+                {
+                    "h_frozen_norm_sum": 0.0,
+                    "h_ctrl_norm_sum": 0.0,
+                    "cond_hidden_norm_sum": 0.0,
+                    "cond_input_norm_sum": 0.0,
+                    "zero_out_norm_sum": 0.0,
+                    "ratio_zero_to_frozen_sum": 0.0,
+                    "count": 0,
+                    "cond_input_count": 0
+                }
+                for _ in range(num_layers)
+            ]
+
         for data in train_loader:
             optimizer.zero_grad()
             model.train()
@@ -65,18 +86,36 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
             sign_flip[sign_flip>=0.5] = 1.0; sign_flip[sign_flip<0.5] = -1.0
             x = data.x * sign_flip.unsqueeze(0)
 
+            log_accumulator = {"layers": epoch_accum} if epoch_accum is not None else None
+
             # Compute condition based on model type
             if config.model in ['GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
                 # Use precomputed k-hop conditions (indexed by original_idx)
                 x_sim_list = [x_sim_k[data.original_idx] for x_sim_k in full_x_sim]
-                preds = model.forward_subgraph(x, x_sim_list, data.edge_index, data.batch, data.root_n_id, frozen=True)
+                preds = model.forward_subgraph(x, x_sim_list, data.edge_index, data.batch, data.root_n_id, frozen=True, log_accumulator=log_accumulator)
             else:
                 x_sim = full_x_sim[data.original_idx]
-                preds = model.forward_subgraph(x, x_sim, data.edge_index, data.batch, data.root_n_id, frozen=True)
+                preds = model.forward_subgraph(x, x_sim, data.edge_index, data.batch, data.root_n_id, frozen=True, log_accumulator=log_accumulator)
                 
             loss = criterion(preds, data.y)
             loss.backward()
             optimizer.step()
+
+        if epoch_accum is not None:
+            epoch_entry = {"epoch": epoch, "layers": []}
+            for layer_data in epoch_accum:
+                cnt = layer_data["count"] if layer_data["count"] > 0 else 1
+                cond_input_cnt = layer_data["cond_input_count"] if layer_data["cond_input_count"] > 0 else None
+                epoch_entry["layers"].append({
+                    "h_frozen_norm": layer_data["h_frozen_norm_sum"] / cnt,
+                    "h_ctrl_norm": layer_data["h_ctrl_norm_sum"] / cnt,
+                    "cond_hidden_norm": layer_data["cond_hidden_norm_sum"] / cnt,
+                    "cond_input_norm": (layer_data["cond_input_norm_sum"] / cond_input_cnt) if cond_input_cnt else None,
+                    "zero_out_norm": layer_data["zero_out_norm_sum"] / cnt,
+                    "ratio_zero_to_frozen": layer_data["ratio_zero_to_frozen_sum"] / cnt,
+                    "batch_count": cnt
+                })
+            norm_logs.append(epoch_entry)
     
         if epoch % eval_steps == 0:
             acc = eval_subgraph(config, model, test_loader, device, full_x_sim)
@@ -90,7 +129,7 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
         if count == patience:
             break
 
-    return best_acc
+    return best_acc, norm_logs
 
 
 def main(config):
@@ -140,10 +179,25 @@ def main(config):
         model = model.to(device)
 
         # finetuning model
-        best_acc = finetune(config, model, train_loader, device, x_sim, test_loader)
+        best_acc, norm_logs = finetune(config, model, train_loader, device, x_sim, test_loader)
         
         acc_list.append(best_acc)
         print(f'Seed: {seed}, Accuracy: {best_acc:.4f}')
+        log_dir = os.path.join('results', 'norm_logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"{config.dataset}_{config.model}_seed{seed}.json")
+        with open(log_path, 'w') as f:
+            json.dump(
+                {
+                    "dataset": config.dataset,
+                    "model": config.model,
+                    "seed": seed,
+                    "log_interval": 5,
+                    "entries": norm_logs
+                },
+                f,
+                indent=2
+            )
 
     final_acc, final_acc_std = np.mean(acc_list), np.std(acc_list)
     print(f"# final_acc: {final_acc:.4f}±{final_acc_std:.4f}")
