@@ -30,9 +30,12 @@ class GCC_GraphControl(nn.Module):
         self.zero_layers = nn.ModuleList(
             nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
         )
+        # Fixed residual scale (prevents overwrite while keeping branch open)
+        self.residual_scale = 0.1
 
         self.linear_classifier = nn.Linear(hidden_size, output_dim)
 
+        # Zero-init control branches (ControlNet-style gradual opening)
         self._zero_init_module(self.cond_proj)
         self._zero_init_module(self.cond_input_adapter)
         for layer in self.zero_layers:
@@ -74,6 +77,7 @@ class GCC_GraphControl(nn.Module):
             h_ctrl = layer_ctrl(ctrl_input, edge_index)
 
             zero_out = zero_layer(h_ctrl)
+            scaled_zero = self.residual_scale * zero_out
 
             if log_accumulator is not None:
                 layer_log = log_accumulator["layers"][layer_idx]
@@ -81,7 +85,7 @@ class GCC_GraphControl(nn.Module):
                 ctrl_norm = torch.norm(h_ctrl.detach(), dim=1).mean().item()
                 cond_hidden_norm = torch.norm(cond_hidden.detach(), dim=1).mean().item()
                 cond_input_norm = torch.norm(cond_first_layer.detach(), dim=1).mean().item() if layer_idx == 0 else None
-                zero_out_norm = torch.norm(zero_out.detach(), dim=1).mean().item()
+                zero_out_norm = torch.norm(scaled_zero.detach(), dim=1).mean().item()
                 ratio = zero_out_norm / (frozen_norm + 1e-12)
 
                 layer_log["h_frozen_norm_sum"] += frozen_norm
@@ -92,9 +96,10 @@ class GCC_GraphControl(nn.Module):
                     layer_log["cond_input_count"] += 1
                 layer_log["zero_out_norm_sum"] += zero_out_norm
                 layer_log["ratio_zero_to_frozen_sum"] += ratio
+                layer_log["zero_layer_weight_norm_sum"] += zero_layer.weight.norm().item()
                 layer_log["count"] += 1
 
-            h_frozen = h_frozen + zero_out
+            h_frozen = h_frozen + scaled_zero
             hidden_states.append(h_frozen)
 
         out, _ = self.encoder.gnn.graph_readout(hidden_states, batch)
@@ -141,6 +146,7 @@ class GCC_GraphControl_KHopPure(nn.Module):
         self.zero_layers = nn.ModuleList([
             nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
         ])
+        self.residual_scale = 0.1
 
         self.linear_classifier = nn.Linear(hidden_size, output_dim)
 
@@ -196,6 +202,7 @@ class GCC_GraphControl_KHopPure(nn.Module):
 
             h_ctrl = layer_ctrl(ctrl_input, edge_index)
             zero_out = zero_layer(h_ctrl)
+            scaled_zero = self.residual_scale * zero_out
 
             if log_accumulator is not None:
                 layer_log = log_accumulator["layers"][layer_idx]
@@ -203,7 +210,7 @@ class GCC_GraphControl_KHopPure(nn.Module):
                 ctrl_norm = torch.norm(h_ctrl.detach(), dim=1).mean().item()
                 cond_hidden_norm = torch.norm(cond_hidden.detach(), dim=1).mean().item()
                 cond_input_norm = torch.norm(cond_first_layer.detach(), dim=1).mean().item() if layer_idx == 0 else None
-                zero_out_norm = torch.norm(zero_out.detach(), dim=1).mean().item()
+                zero_out_norm = torch.norm(scaled_zero.detach(), dim=1).mean().item()
                 ratio = zero_out_norm / (frozen_norm + 1e-12)
 
                 layer_log["h_frozen_norm_sum"] += frozen_norm
@@ -214,9 +221,10 @@ class GCC_GraphControl_KHopPure(nn.Module):
                     layer_log["cond_input_count"] += 1
                 layer_log["zero_out_norm_sum"] += zero_out_norm
                 layer_log["ratio_zero_to_frozen_sum"] += ratio
+                layer_log["zero_layer_weight_norm_sum"] += zero_layer.weight.norm().item()
                 layer_log["count"] += 1
 
-            h_frozen = h_frozen + zero_out
+            h_frozen = h_frozen + scaled_zero
             hidden_states.append(h_frozen)
 
         out, _ = self.encoder.gnn.graph_readout(hidden_states, batch)
@@ -263,6 +271,7 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
         self.zero_layers = nn.ModuleList([
             nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
         ])
+        self.residual_scale = 0.1
 
         self.linear_classifier = nn.Linear(hidden_size, output_dim)
 
@@ -318,6 +327,7 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
 
             h_ctrl = layer_ctrl(ctrl_input, edge_index)
             zero_out = zero_layer(h_ctrl)
+            scaled_zero = self.residual_scale * zero_out
 
             if log_accumulator is not None:
                 layer_log = log_accumulator["layers"][layer_idx]
@@ -325,7 +335,7 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
                 ctrl_norm = torch.norm(h_ctrl.detach(), dim=1).mean().item()
                 cond_hidden_norm = torch.norm(cond_hidden.detach(), dim=1).mean().item()
                 cond_input_norm = torch.norm(cond_first_layer.detach(), dim=1).mean().item() if layer_idx == 0 else None
-                zero_out_norm = torch.norm(zero_out.detach(), dim=1).mean().item()
+                zero_out_norm = torch.norm(scaled_zero.detach(), dim=1).mean().item()
                 ratio = zero_out_norm / (frozen_norm + 1e-12)
 
                 layer_log["h_frozen_norm_sum"] += frozen_norm
@@ -336,9 +346,10 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
                     layer_log["cond_input_count"] += 1
                 layer_log["zero_out_norm_sum"] += zero_out_norm
                 layer_log["ratio_zero_to_frozen_sum"] += ratio
+                layer_log["zero_layer_weight_norm_sum"] += zero_layer.weight.norm().item()
                 layer_log["count"] += 1
 
-            h_frozen = h_frozen + zero_out
+            h_frozen = h_frozen + scaled_zero
             hidden_states.append(h_frozen)
 
         out, _ = self.encoder.gnn.graph_readout(hidden_states, batch)

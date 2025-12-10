@@ -69,6 +69,7 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
                     "cond_input_norm_sum": 0.0,
                     "zero_out_norm_sum": 0.0,
                     "ratio_zero_to_frozen_sum": 0.0,
+                    "zero_layer_weight_norm_sum": 0.0,
                     "count": 0,
                     "cond_input_count": 0
                 }
@@ -115,6 +116,7 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
                     "cond_input_norm": (layer_data["cond_input_norm_sum"] / cond_input_cnt) if cond_input_cnt else None,
                     "zero_out_norm": layer_data["zero_out_norm_sum"] / cnt,
                     "ratio_zero_to_frozen": layer_data["ratio_zero_to_frozen_sum"] / cnt,
+                    "zero_layer_weight_norm": layer_data["zero_layer_weight_norm_sum"] / cnt,
                     "batch_count": cnt
                 })
             if norm_logs is not None:
