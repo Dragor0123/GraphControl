@@ -26,10 +26,7 @@ def load_model(input_dim: int, output_dim: int, config):
             norm=opt.norm,
             degree_input=True,
             num_classes=output_dim,
-            ctrl_norm_type=getattr(config, 'ctrl_norm_type', 'none'),
-            cond_type=getattr(config, 'cond_type', 'feature'),
-            two_hop_threshold=getattr(config, 'two_hop_threshold', 0.0),
-            two_hop_topk=getattr(config, 'two_hop_topk', 0)
+            ctrl_norm_type=getattr(config, 'ctrl_norm_type', 'none')
         )
         
         model = register.models[config.model](**model_kwargs)

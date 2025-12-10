@@ -56,8 +56,8 @@ class Arguments:
             '--cond_type',
             type=str,
             default='feature',
-            choices=['feature', 's1_2hop', 's2_struct_scalar'],
-            help='Condition graph type: feature similarity (default), S1 2-hop structural, or S2 degree+PageRank scalars'
+            choices=['feature', 's1_2hop'],
+            help='Condition graph type: feature similarity (default) or S1 2-hop structural'
         )
         self.parser.add_argument(
             '--two_hop_threshold',
@@ -70,25 +70,6 @@ class Arguments:
             type=int,
             default=0,
             help='Top-k neighbors per node for S1 2-hop condition (0 to disable)'
-        )
-        # S2 structural scalars
-        self.parser.add_argument(
-            '--pr_alpha',
-            type=float,
-            default=0.85,
-            help='PageRank alpha for S2 structural condition'
-        )
-        self.parser.add_argument(
-            '--deg_log',
-            action='store_true',
-            help='Use log(1+deg) for S2 structural condition'
-        )
-        self.parser.add_argument(
-            '--cond_struct_norm',
-            type=str,
-            default='standard',
-            choices=['none', 'standard', 'minmax'],
-            help='Normalization for structural condition (degree, pagerank)'
         )
         
     def parse_args(self):
