@@ -31,7 +31,7 @@ class GCC_GraphControl(nn.Module):
             nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
         )
         # Fixed residual scale (prevents overwrite while keeping branch open)
-        self.residual_scale = 0.1
+        self.residual_scale = 0.01
 
         self.linear_classifier = nn.Linear(hidden_size, output_dim)
 
@@ -146,7 +146,7 @@ class GCC_GraphControl_KHopPure(nn.Module):
         self.zero_layers = nn.ModuleList([
             nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
         ])
-        self.residual_scale = 0.1
+        self.residual_scale = 0.01
 
         self.linear_classifier = nn.Linear(hidden_size, output_dim)
 
@@ -271,7 +271,7 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
         self.zero_layers = nn.ModuleList([
             nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)
         ])
-        self.residual_scale = 0.1
+        self.residual_scale = 0.01
 
         self.linear_classifier = nn.Linear(hidden_size, output_dim)
 
