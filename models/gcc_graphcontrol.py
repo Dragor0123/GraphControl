@@ -18,6 +18,7 @@ class GCC_GraphControl(nn.Module):
         self.cond_type = kwargs.pop('cond_type', 'feature')
         self.two_hop_threshold = kwargs.pop('two_hop_threshold', 0.0)
         self.two_hop_topk = kwargs.pop('two_hop_topk', 0)
+        self.use_struct_cond = self.cond_type == 's2_struct_scalar'
         positional_dim = kwargs['positional_embedding_size']
         hidden_size = kwargs['node_hidden_dim']
         output_dim = kwargs['num_classes']
@@ -29,6 +30,7 @@ class GCC_GraphControl(nn.Module):
         self.node_input_dim = self.encoder.node_input_dim # 값 알아보기 
 
         self.cond_proj = nn.Linear(positional_dim, hidden_size)
+        self.cond_struct_proj = nn.Linear(2, hidden_size)
         self.cond_input_adapter = nn.Linear(hidden_size, self.node_input_dim)
         num_layers = len(self.encoder.gnn.layers)
         self.zero_layers = nn.ModuleList(
@@ -41,6 +43,7 @@ class GCC_GraphControl(nn.Module):
 
         # Zero-init control branches (ControlNet-style gradual opening)
         self._zero_init_module(self.cond_proj)
+        self._zero_init_module(self.cond_struct_proj)
         self._zero_init_module(self.cond_input_adapter)
         for layer in self.zero_layers:
             self._zero_init_module(layer)
@@ -51,7 +54,7 @@ class GCC_GraphControl(nn.Module):
     def reset_classifier(self):
         self.linear_classifier.reset_parameters()
 
-    def forward_subgraph(self, x, x_sim, edge_index, batch, root_n_id, edge_weight=None, frozen=False, log_accumulator=None, **kwargs):
+    def forward_subgraph(self, x, x_sim, edge_index, batch, root_n_id, edge_weight=None, frozen=False, log_accumulator=None, struct_cond=None, **kwargs):
         if not frozen:
             raise NotImplementedError('Please freeze pre-trained models')
 
@@ -61,7 +64,10 @@ class GCC_GraphControl(nn.Module):
             h_frozen = self.encoder.prepare_node_features(x, edge_index, root_n_id)
 
         h_ctrl = self.trainable_copy.prepare_node_features(x, edge_index, root_n_id)
-        cond_hidden = self.cond_proj(x_sim)
+        if self.use_struct_cond and struct_cond is not None:
+            cond_hidden = self.cond_struct_proj(struct_cond)
+        else:
+            cond_hidden = self.cond_proj(x_sim)
         cond_first_layer = self.cond_input_adapter(cond_hidden)
 
         hidden_states = [h_frozen]
@@ -135,6 +141,7 @@ class GCC_GraphControl_KHopPure(nn.Module):
         self.cond_type = kwargs.pop('cond_type', 'feature')
         self.two_hop_threshold = kwargs.pop('two_hop_threshold', 0.0)
         self.two_hop_topk = kwargs.pop('two_hop_topk', 0)
+        self.use_struct_cond = self.cond_type == 's2_struct_scalar'
         positional_dim = kwargs['positional_embedding_size']
         hidden_size = kwargs['node_hidden_dim']
         output_dim = kwargs['num_classes']
@@ -147,6 +154,7 @@ class GCC_GraphControl_KHopPure(nn.Module):
 
         # SHARED projection (same as baseline)
         self.cond_proj = nn.Linear(positional_dim, hidden_size)
+        self.cond_struct_proj = nn.Linear(2, hidden_size)
         self.cond_input_adapter = nn.Linear(hidden_size, self.node_input_dim)
 
         num_layers = len(self.encoder.gnn.layers)
@@ -159,6 +167,7 @@ class GCC_GraphControl_KHopPure(nn.Module):
         self.linear_classifier = nn.Linear(hidden_size, output_dim)
 
         self._zero_init_module(self.cond_proj)
+        self._zero_init_module(self.cond_struct_proj)
         self._zero_init_module(self.cond_input_adapter)
         for layer in self.zero_layers:
             self._zero_init_module(layer)
@@ -169,7 +178,7 @@ class GCC_GraphControl_KHopPure(nn.Module):
     def reset_classifier(self):
         self.linear_classifier.reset_parameters()
 
-    def forward_subgraph(self, x, x_sim_list, edge_index, batch, root_n_id, edge_weight=None, frozen=False, log_accumulator=None, **kwargs):
+    def forward_subgraph(self, x, x_sim_list, edge_index, batch, root_n_id, edge_weight=None, frozen=False, log_accumulator=None, struct_cond=None, **kwargs):
         """
         Args:
             x: Positional embedding
@@ -199,8 +208,11 @@ class GCC_GraphControl_KHopPure(nn.Module):
                 h_frozen = layer_frozen(h_frozen, edge_index)
 
             # Use k-hop specific condition
-            x_sim_k = x_sim_list[layer_idx]
-            cond_hidden = self.cond_proj(x_sim_k)
+            if self.use_struct_cond and struct_cond is not None:
+                cond_hidden = self.cond_struct_proj(struct_cond)
+            else:
+                x_sim_k = x_sim_list[layer_idx]
+                cond_hidden = self.cond_proj(x_sim_k)
 
             if layer_idx == 0:
                 cond_first_layer = self.cond_input_adapter(cond_hidden)
@@ -268,6 +280,7 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
         self.cond_type = kwargs.pop('cond_type', 'feature')
         self.two_hop_threshold = kwargs.pop('two_hop_threshold', 0.0)
         self.two_hop_topk = kwargs.pop('two_hop_topk', 0)
+        self.use_struct_cond = self.cond_type == 's2_struct_scalar'
         positional_dim = kwargs['positional_embedding_size']
         hidden_size = kwargs['node_hidden_dim']
         output_dim = kwargs['num_classes']
@@ -280,6 +293,7 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
 
         # SHARED projection (same as baseline)
         self.cond_proj = nn.Linear(positional_dim, hidden_size)
+        self.cond_struct_proj = nn.Linear(2, hidden_size)
         self.cond_input_adapter = nn.Linear(hidden_size, self.node_input_dim)
 
         num_layers = len(self.encoder.gnn.layers)
@@ -305,6 +319,7 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
         self.linear_classifier = nn.Linear(hidden_size, output_dim)
 
         self._zero_init_module(self.cond_proj)
+        self._zero_init_module(self.cond_struct_proj)
         self._zero_init_module(self.cond_input_adapter)
         for layer in self.zero_layers:
             self._zero_init_module(layer)
@@ -315,7 +330,7 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
     def reset_classifier(self):
         self.linear_classifier.reset_parameters()
 
-    def forward_subgraph(self, x, x_sim_list, edge_index, batch, root_n_id, edge_weight=None, frozen=False, log_accumulator=None, **kwargs):
+    def forward_subgraph(self, x, x_sim_list, edge_index, batch, root_n_id, edge_weight=None, frozen=False, log_accumulator=None, struct_cond=None, **kwargs):
         """
         Args:
             x: Positional embedding
@@ -345,8 +360,11 @@ class GCC_GraphControl_KHopCumulative(nn.Module):
                 h_frozen = layer_frozen(h_frozen, edge_index)
 
             # Use cumulative k-hop condition
-            x_sim_k = x_sim_list[layer_idx]
-            cond_hidden = self.cond_proj(x_sim_k)
+            if self.use_struct_cond and struct_cond is not None:
+                cond_hidden = self.cond_struct_proj(struct_cond)
+            else:
+                x_sim_k = x_sim_list[layer_idx]
+                cond_hidden = self.cond_proj(x_sim_k)
 
             if layer_idx == 0:
                 cond_first_layer = self.cond_input_adapter(cond_hidden)

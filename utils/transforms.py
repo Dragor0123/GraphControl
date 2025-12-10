@@ -7,6 +7,7 @@ import sklearn.preprocessing as preprocessing
 import numpy as np
 
 from .normalize import similarity, get_laplacian_matrix
+from torch_geometric.utils import add_self_loops, to_scipy_sparse_matrix
 
 def apply_edge_dropout_to_similarity(x_sim, dropout_rate=0.2):
     """
@@ -619,3 +620,68 @@ def _row_topk_csr(mat_csr, k):
         cols.extend(row_idx[topk_idx])
         data.extend(row_data[topk_idx])
     return sp.csr_matrix((data, (rows, cols)), shape=mat_csr.shape)
+
+
+def compute_structural_scalar_condition(data, pr_alpha=0.85, deg_log=True, norm_type='standard'):
+    """
+    Compute node-wise structural condition [deg, pagerank] (S2).
+
+    Args:
+        data: PyG Data with edge_index
+        pr_alpha: PageRank alpha
+        deg_log: whether to use log1p on degree
+        norm_type: one of ['none','standard','minmax']
+
+    Returns:
+        torch.Tensor [N, 2] on same device as data.x
+    """
+    import scipy.sparse as sp
+
+    num_nodes = data.x.size(0)
+    device = data.x.device
+
+    # Build adjacency with self-loops
+    edge_index_with_loops, _ = add_self_loops(data.edge_index, num_nodes=num_nodes)
+    A = to_scipy_sparse_matrix(edge_index_with_loops, num_nodes=num_nodes).tocsr()
+
+    # Degree
+    deg = np.array(A.sum(axis=1)).flatten().astype(np.float64)
+    if deg_log:
+        deg = np.log1p(deg)
+
+    # PageRank (power iteration)
+    row_sum = np.array(A.sum(axis=1)).flatten()
+    row_sum[row_sum == 0] = 1.0
+    inv_row = 1.0 / row_sum
+    D_inv = sp.diags(inv_row)
+    P = D_inv @ A  # row-stochastic
+
+    pr = np.ones(num_nodes, dtype=np.float64) / num_nodes
+    teleport = (1.0 - pr_alpha) / num_nodes
+    for _ in range(50):
+        pr_new = pr_alpha * (P.T @ pr) + teleport
+        if np.linalg.norm(pr_new - pr, 1) < 1e-8:
+            pr = pr_new
+            break
+        pr = pr_new
+
+    def _normalize(vec):
+        if norm_type == 'none':
+            return vec
+        if norm_type == 'standard':
+            mean = vec.mean()
+            std = vec.std() + 1e-12
+            return (vec - mean) / std
+        if norm_type == 'minmax':
+            mn = vec.min()
+            mx = vec.max()
+            denom = (mx - mn) if (mx - mn) != 0 else 1.0
+            return (vec - mn) / denom
+        return vec
+
+    deg_norm = _normalize(deg)
+    pr_norm = _normalize(pr)
+
+    cond_struct = np.stack([deg_norm, pr_norm], axis=-1)
+    cond_struct = torch.from_numpy(cond_struct).float().to(device)
+    return cond_struct

@@ -15,6 +15,7 @@ from utils.transforms import (
     precompute_khop_conditions_pure,
     precompute_khop_conditions_cumulative,
     build_two_hop_condition_pe,
+    compute_structural_scalar_condition,
 )
 from models import load_model
 from datasets import NodeDataset
@@ -42,7 +43,7 @@ def preprocess(config, dataset_obj, device):
     return train_loader, test_loader
 
 
-def finetune(config, model, train_loader, device, full_x_sim, test_loader):
+def finetune(config, model, train_loader, device, full_x_sim, test_loader, struct_cond=None):
     # freeze the pre-trained encoder (left branch)
     for k, v in model.named_parameters():
         if 'encoder' in k:
@@ -100,11 +101,13 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
             # Compute condition based on model type
             if config.model in ['GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
                 # Use precomputed k-hop conditions (indexed by original_idx)
-                x_sim_list = [x_sim_k[data.original_idx] for x_sim_k in full_x_sim]
-                preds = model.forward_subgraph(x, x_sim_list, data.edge_index, data.batch, data.root_n_id, frozen=True, log_accumulator=log_accumulator)
+                x_sim_list = [x_sim_k[data.original_idx] for x_sim_k in full_x_sim] if full_x_sim is not None else None
+                struct_batch = struct_cond[data.original_idx] if struct_cond is not None else None
+                preds = model.forward_subgraph(x, x_sim_list, data.edge_index, data.batch, data.root_n_id, frozen=True, log_accumulator=log_accumulator, struct_cond=struct_batch)
             else:
-                x_sim = full_x_sim[data.original_idx]
-                preds = model.forward_subgraph(x, x_sim, data.edge_index, data.batch, data.root_n_id, frozen=True, log_accumulator=log_accumulator)
+                x_sim = full_x_sim[data.original_idx] if full_x_sim is not None else None
+                struct_batch = struct_cond[data.original_idx] if struct_cond is not None else None
+                preds = model.forward_subgraph(x, x_sim, data.edge_index, data.batch, data.root_n_id, frozen=True, log_accumulator=log_accumulator, struct_cond=struct_batch)
                 
             loss = criterion(preds, data.y)
             loss.backward()
@@ -129,7 +132,7 @@ def finetune(config, model, train_loader, device, full_x_sim, test_loader):
                 norm_logs.append(epoch_entry)
     
         if epoch % eval_steps == 0:
-            acc = eval_subgraph(config, model, test_loader, device, full_x_sim)
+            acc = eval_subgraph(config, model, test_loader, device, full_x_sim, struct_cond)
             process_bar.set_postfix({"Epoch": epoch, "Accuracy": f"{acc:.4f}"})
             if best_acc < acc:
                 best_acc = acc
@@ -154,6 +157,7 @@ def main(config):
         dataset_obj.to(device)
 
     # Precompute conditions based on model type
+    struct_cond = None
     if getattr(config, "cond_type", "feature") == "s1_2hop":
         print('Precomputing S1 2-hop condition...')
         two_hop_pe = build_two_hop_condition_pe(
@@ -168,6 +172,15 @@ def main(config):
             x_sim = [two_hop_pe for _ in range(5)]
         else:
             x_sim = two_hop_pe
+    elif getattr(config, "cond_type", "feature") == "s2_struct_scalar":
+        print('Precomputing S2 structural scalar condition (deg + PageRank)...')
+        struct_cond = compute_structural_scalar_condition(
+            dataset_obj.data,
+            pr_alpha=config.pr_alpha,
+            deg_log=config.deg_log,
+            norm_type=config.cond_struct_norm
+        ).to(device)
+        x_sim = None
     elif config.model == 'GCC_GraphControl_KHopPure':
         print('Precomputing k-hop conditions (Pure)...')
         x_sim = [x.to(device) for x in precompute_khop_conditions_pure(
@@ -204,7 +217,7 @@ def main(config):
         model = model.to(device)
 
         # finetuning model
-        best_acc, norm_logs = finetune(config, model, train_loader, device, x_sim, test_loader)
+        best_acc, norm_logs = finetune(config, model, train_loader, device, x_sim, test_loader, struct_cond=struct_cond)
         
         acc_list.append(best_acc)
         print(f'Seed: {seed}, Accuracy: {best_acc:.4f}')
@@ -229,7 +242,7 @@ def main(config):
     print(f"# final_acc: {final_acc:.4f}±{final_acc_std:.4f}")
 
 
-def eval_subgraph(config, model, test_loader, device, full_x_sim):
+def eval_subgraph(config, model, test_loader, device, full_x_sim, struct_cond=None):
     model.eval()
 
     correct = 0
@@ -242,11 +255,13 @@ def eval_subgraph(config, model, test_loader, device, full_x_sim):
         # Compute condition based on model type
         if config.model in ['GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
             # Use precomputed k-hop conditions (indexed by original_idx)
-            x_sim_list = [x_sim_k[batch.original_idx] for x_sim_k in full_x_sim]
-            preds = model.forward_subgraph(batch.x, x_sim_list, batch.edge_index, batch.batch, batch.root_n_id, frozen=True).argmax(dim=1)
+            x_sim_list = [x_sim_k[batch.original_idx] for x_sim_k in full_x_sim] if full_x_sim is not None else None
+            struct_batch = struct_cond[batch.original_idx] if struct_cond is not None else None
+            preds = model.forward_subgraph(batch.x, x_sim_list, batch.edge_index, batch.batch, batch.root_n_id, frozen=True, struct_cond=struct_batch).argmax(dim=1)
         else:
-            x_sim = full_x_sim[batch.original_idx]
-            preds = model.forward_subgraph(batch.x, x_sim, batch.edge_index, batch.batch, batch.root_n_id, frozen=True).argmax(dim=1)
+            x_sim = full_x_sim[batch.original_idx] if full_x_sim is not None else None
+            struct_batch = struct_cond[batch.original_idx] if struct_cond is not None else None
+            preds = model.forward_subgraph(batch.x, x_sim, batch.edge_index, batch.batch, batch.root_n_id, frozen=True, struct_cond=struct_batch).argmax(dim=1)
 
         correct += (preds == batch.y).sum().item()
         total_num += batch.y.shape[0]
