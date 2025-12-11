@@ -15,6 +15,7 @@ from utils.transforms import (
     precompute_khop_conditions_pure,
     precompute_khop_conditions_cumulative,
     build_two_hop_condition_pe,
+    build_ppr_condition_pe,
 )
 from models import load_model
 from datasets import NodeDataset
@@ -168,6 +169,20 @@ def main(config):
             x_sim = [two_hop_pe for _ in range(5)]
         else:
             x_sim = two_hop_pe
+    elif getattr(config, "cond_type", "feature") == "s3_ppr":
+        print('Precomputing S3 PPR condition...')
+        ppr_pe = build_ppr_condition_pe(
+            dataset_obj.data,
+            num_dim=config.num_dim,
+            alpha=config.ppr_alpha,
+            topk=config.ppr_topk,
+            symmetric=config.ppr_symmetric,
+            normalize=config.ppr_normalize
+        ).to(device)
+        if config.model in ['GCC_GraphControl_KHopPure', 'GCC_GraphControl_KHopCumulative']:
+            x_sim = [ppr_pe for _ in range(5)]
+        else:
+            x_sim = ppr_pe
     elif config.model == 'GCC_GraphControl_KHopPure':
         print('Precomputing k-hop conditions (Pure)...')
         x_sim = [x.to(device) for x in precompute_khop_conditions_pure(

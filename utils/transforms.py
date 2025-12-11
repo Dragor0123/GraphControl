@@ -8,6 +8,7 @@ import numpy as np
 
 from .normalize import similarity, get_laplacian_matrix
 from torch_geometric.utils import add_self_loops, to_scipy_sparse_matrix
+import scipy.sparse as sp
 
 def apply_edge_dropout_to_similarity(x_sim, dropout_rate=0.2):
     """
@@ -620,3 +621,78 @@ def _row_topk_csr(mat_csr, k):
         cols.extend(row_idx[topk_idx])
         data.extend(row_data[topk_idx])
     return sp.csr_matrix((data, (rows, cols)), shape=mat_csr.shape)
+
+
+def build_ppr_condition_pe(data, num_dim=32, alpha=0.15, topk=32, symmetric=False, normalize=True):
+    """
+    Build positional embeddings from PPR-based sparse adjacency (S3).
+
+    Args:
+        data: PyG Data with edge_index
+        num_dim: PE dimension
+        alpha: teleport probability
+        topk: top-k neighbors per node
+        symmetric: symmetrize PPR matrix
+        normalize: row-normalize PPR matrix
+
+    Returns:
+        torch.Tensor [N, num_dim]
+    """
+    device = data.x.device
+    num_nodes = data.x.size(0)
+
+    # Adjacency with self-loops
+    edge_index_with_loops, _ = add_self_loops(data.edge_index, num_nodes=num_nodes)
+    A = to_scipy_sparse_matrix(edge_index_with_loops, num_nodes=num_nodes).tocsr()
+
+    # Transition matrix T
+    deg = np.array(A.sum(axis=1)).flatten()
+    inv_deg = 1.0 / np.maximum(deg, 1e-12)
+    D_inv = sp.diags(inv_deg)
+    T = D_inv @ A  # row-stochastic
+
+    # Power iteration for PPR
+    I = sp.eye(num_nodes, format='csr')
+    P = I.copy()
+    for _ in range(10):
+        P = alpha * I + (1 - alpha) * (P @ T)
+
+    # Top-k per row
+    if topk > 0:
+        P = _row_topk_csr(P, k=topk)
+
+    # Symmetrize if needed
+    if symmetric:
+        P = 0.5 * (P + P.T)
+
+    # Remove self-loops
+    P.setdiag(0)
+    P.eliminate_zeros()
+
+    # Row-normalize
+    if normalize:
+        row_sum = np.array(P.sum(axis=1)).flatten()
+        row_sum[row_sum == 0] = 1.0
+        inv_row = 1.0 / row_sum
+        D_inv_p = sp.diags(inv_row)
+        P = D_inv_p @ P
+
+    # Laplacian PE
+    P_dense = torch.from_numpy(P.toarray()).float().to(device)
+    L = get_laplacian_matrix(P_dense)
+    try:
+        eigen_vals, eigen_vecs = torch.linalg.eigh(L)
+    except RuntimeError:
+        L_np = L.cpu().numpy()
+        eigen_vals, eigen_vecs = scipy.linalg.eigh(L_np)
+        eigen_vecs = torch.from_numpy(eigen_vecs).to(device)
+
+    if eigen_vecs.shape[1] < num_dim:
+        PE = torch.nn.functional.pad(eigen_vecs, (0, num_dim - eigen_vecs.shape[1]))
+    else:
+        PE = eigen_vecs[:, :num_dim]
+
+    PE = PE.float()
+    PE_np = preprocessing.normalize(PE.cpu().numpy(), norm="l2")
+    PE = torch.tensor(PE_np, dtype=torch.float32, device=device)
+    return PE

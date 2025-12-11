@@ -56,8 +56,8 @@ class Arguments:
             '--cond_type',
             type=str,
             default='feature',
-            choices=['feature', 's1_2hop'],
-            help='Condition graph type: feature similarity (default) or S1 2-hop structural'
+            choices=['feature', 's1_2hop', 's3_ppr'],
+            help='Condition graph type: feature similarity (default), S1 2-hop structural, or S3 PPR-based structural'
         )
         self.parser.add_argument(
             '--two_hop_threshold',
@@ -70,6 +70,29 @@ class Arguments:
             type=int,
             default=0,
             help='Top-k neighbors per node for S1 2-hop condition (0 to disable)'
+        )
+        # S3 PPR structural condition
+        self.parser.add_argument(
+            '--ppr_alpha',
+            type=float,
+            default=0.15,
+            help='Teleport probability for PPR condition (S3)'
+        )
+        self.parser.add_argument(
+            '--ppr_topk',
+            type=int,
+            default=32,
+            help='Top-k neighbors per node for PPR condition (S3)'
+        )
+        self.parser.add_argument(
+            '--ppr_symmetric',
+            action='store_true',
+            help='Symmetrize PPR condition adjacency (S3)'
+        )
+        self.parser.add_argument(
+            '--ppr_normalize',
+            action='store_true',
+            help='Row-normalize PPR condition adjacency (S3)'
         )
         
     def parse_args(self):

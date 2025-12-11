@@ -1032,3 +1032,280 @@ Input: x [B, num_nodes, 32],
 - K-hop conditions (Pure): `utils/transforms.py:127`
 - GCC_GraphControl model: `models/gcc_graphcontrol.py:10`
 - GCC_GraphControl_KHopPure model: `models/gcc_graphcontrol.py:94`
+
+---
+
+## Tensor Shapes Example: Cora_ML Dataset with GCC_GraphControl
+
+Command:
+```bash
+python graphcontrol.py --model GCC_GraphControl --dataset Cora_ML --epochs 100 --lr 0.5 --optimizer adamw --threshold 0.17 --use_adj --cond_type feature --seeds 0
+```
+
+### Dataset Information
+- **Number of nodes**: 2995
+- **Original feature dimension**: 2879
+- **Number of classes**: 7
+- **Batch size**: 128
+
+### Pretrained GCC Configuration (from checkpoint/gcc.pth)
+- **hidden_size**: 64
+- **num_layers**: 5 (GIN layers)
+- **positional_embedding_size**: 32
+- **degree_input**: True
+- **node_input_dim**: 32 (positional) + 32 (degree) + 1 (ego_indicator) = 65
+
+### Subgraph Statistics (Approximate)
+- **Average subgraph nodes**: ~50-100 nodes per subgraph (depends on random walk)
+- **Batch total nodes**: Variable (sum of all subgraph nodes in batch)
+  - Example: If avg subgraph has 80 nodes, then batch_total_nodes ≈ 128 × 80 = 10,240
+
+For clarity, let's denote:
+- `B = 128` (batch_size)
+- `N_total` = total nodes in batch (e.g., ~10,000)
+- `E_total` = total edges in batch
+
+---
+
+### GCC_GraphControl Forward Pass Tensor Shapes
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         INPUT STAGE                              │
+└─────────────────────────────────────────────────────────────────┘
+
+x (positional encoding from process_attributes):
+  Shape: [N_total, 32]
+  Example: [10240, 32]
+
+x_sim (condition, full graph):
+  Shape: [2995, 32]  (full graph nodes)
+  After indexing by data.original_idx:
+  Shape: [B, 32] = [128, 32]
+
+edge_index:
+  Shape: [2, E_total]
+
+batch (batch assignment vector):
+  Shape: [N_total]
+  Example: [10240]
+
+root_n_id (target nodes in each subgraph):
+  Shape: [B] = [128]
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    PREPARE NODE FEATURES                         │
+│              (encoder.prepare_node_features)                     │
+└─────────────────────────────────────────────────────────────────┘
+
+degrees = degree(edge_index[0]):
+  Shape: [N_total]
+  Example: [10240]
+
+degree_embedding(degrees):
+  Input: [N_total]
+  Output: [N_total, 32]
+  Example: [10240, 32]
+
+ego_indicator:
+  Shape: [N_total, 1]
+  Example: [10240, 1]
+
+n_feat = cat(x, degree_embedding, ego_indicator):
+  Shape: [N_total, 65]  (32 + 32 + 1)
+  Example: [10240, 65]
+
+h_frozen (initial):
+  Shape: [N_total, 65]
+  Example: [10240, 65]
+
+h_ctrl (initial):
+  Shape: [N_total, 65]
+  Example: [10240, 65]
+
+┌─────────────────────────────────────────────────────────────────┐
+│                     CONDITION PROJECTION                         │
+│                   (trainable_copy branch)                        │
+└─────────────────────────────────────────────────────────────────┘
+
+x_sim (batch-indexed):
+  Shape: [B, 32] = [128, 32]
+
+cond_hidden = cond_proj(x_sim):
+  Input: [128, 32]
+  cond_proj: Linear(32 → 64)
+  Output: [128, 64]
+
+cond_first_layer = cond_input_adapter(cond_hidden):
+  Input: [128, 64]
+  cond_input_adapter: Linear(64 → 65)
+  Output: [128, 65]
+
+Note: cond_hidden is reused for layers 1-4
+      cond_first_layer is only used for layer 0
+
+┌─────────────────────────────────────────────────────────────────┐
+│                  LAYER 0 PROCESSING                              │
+└─────────────────────────────────────────────────────────────────┘
+
+Frozen Branch:
+  h_frozen (input): [N_total, 65] = [10240, 65]
+  layer_frozen[0](h_frozen, edge_index):
+    MLP(65 → 64) → BatchNorm → ReLU
+  h_frozen (output): [N_total, 64] = [10240, 64]
+
+Control Branch:
+  h_ctrl (input): [N_total, 65] = [10240, 65]
+
+  Broadcast condition to all nodes in batch:
+  cond_first_layer: [B, 65] = [128, 65]
+  → Expanded to [N_total, 65] using batch assignment
+
+  ctrl_input = h_ctrl + cond_first_layer (broadcasted):
+    Shape: [N_total, 65] = [10240, 65]
+
+  layer_ctrl[0](ctrl_input, edge_index):
+    MLP(65 → 64) → BatchNorm → ReLU
+  h_ctrl (output): [N_total, 64] = [10240, 64]
+
+Zero Layer:
+  zero_layer[0](h_ctrl):
+    Input: [N_total, 64] = [10240, 64]
+    Linear(64 → 64), zero-initialized
+    Output (zero_out): [N_total, 64] = [10240, 64]
+
+Merge:
+  scaled_zero = 0.01 * zero_out:
+    Shape: [N_total, 64] = [10240, 64]
+
+  h_frozen = h_frozen + scaled_zero:
+    Shape: [N_total, 64] = [10240, 64]
+
+hidden_states.append(h_frozen):
+  hidden_states[0]: [N_total, 65] (initial)
+  hidden_states[1]: [N_total, 64] (after layer 0)
+
+┌─────────────────────────────────────────────────────────────────┐
+│              LAYERS 1-4 PROCESSING (similar to Layer 0)          │
+└─────────────────────────────────────────────────────────────────┘
+
+For each layer k ∈ {1, 2, 3, 4}:
+
+Frozen Branch:
+  h_frozen (input): [N_total, 64]
+  layer_frozen[k](h_frozen, edge_index):
+    MLP(64 → 64) → BatchNorm → ReLU
+  h_frozen (output): [N_total, 64]
+
+Control Branch:
+  h_ctrl (input): [N_total, 64]
+
+  Broadcast condition:
+  cond_hidden: [B, 64] = [128, 64]
+  → Expanded to [N_total, 64] using batch assignment
+
+  ctrl_input = h_ctrl + cond_hidden (broadcasted):
+    Shape: [N_total, 64]
+
+  layer_ctrl[k](ctrl_input, edge_index):
+    MLP(64 → 64) → BatchNorm → ReLU
+  h_ctrl (output): [N_total, 64]
+
+Zero Layer:
+  zero_layer[k](h_ctrl):
+    Input: [N_total, 64]
+    Linear(64 → 64), zero-initialized
+    Output (zero_out): [N_total, 64]
+
+Merge:
+  scaled_zero = 0.01 * zero_out:
+    Shape: [N_total, 64]
+
+  h_frozen = h_frozen + scaled_zero:
+    Shape: [N_total, 64]
+
+hidden_states.append(h_frozen):
+  hidden_states[k+1]: [N_total, 64]
+
+Final hidden_states list:
+  [0]: [N_total, 65]  (initial features)
+  [1]: [N_total, 64]  (after layer 0)
+  [2]: [N_total, 64]  (after layer 1)
+  [3]: [N_total, 64]  (after layer 2)
+  [4]: [N_total, 64]  (after layer 3)
+  [5]: [N_total, 64]  (after layer 4)
+
+┌─────────────────────────────────────────────────────────────────┐
+│                      GRAPH READOUT                               │
+└─────────────────────────────────────────────────────────────────┘
+
+encoder.gnn.graph_readout(hidden_states, batch):
+
+For each layer's hidden state:
+  pooled[i] = global_add_pool(hidden_states[i], batch):
+    Input: [N_total, dim]
+    Output: [B, dim]
+
+  Examples:
+  pooled[0]: [B, 65] = [128, 65]
+  pooled[1]: [B, 64] = [128, 64]
+  pooled[2]: [B, 64] = [128, 64]
+  pooled[3]: [B, 64] = [128, 64]
+  pooled[4]: [B, 64] = [128, 64]
+  pooled[5]: [B, 64] = [128, 64]
+
+Readout prediction for each layer:
+  linears_prediction[i](pooled[i]):
+    linears_prediction[0]: Linear(65 → 64)
+    linears_prediction[1-5]: Linear(64 → 64)
+
+Sum over all layers:
+  score_over_layer = sum(dropout(linears_prediction[i](pooled[i])))
+  Shape: [B, 64] = [128, 64]
+
+Output:
+  out: [B, 64] = [128, 64]
+
+┌─────────────────────────────────────────────────────────────────┐
+│                      NORMALIZATION                               │
+└─────────────────────────────────────────────────────────────────┘
+
+if encoder.norm (True in pretrained model):
+  out = F.normalize(out, p=2, dim=-1):
+    Input: [B, 64] = [128, 64]
+    Output: [B, 64] = [128, 64] (L2 normalized)
+
+┌─────────────────────────────────────────────────────────────────┐
+│                     CLASSIFICATION                               │
+└─────────────────────────────────────────────────────────────────┘
+
+x = linear_classifier(out):
+  Input: [B, 64] = [128, 64]
+  linear_classifier: Linear(64 → 7)
+  Output: [B, 7] = [128, 7] (logits for 7 classes)
+
+Final output shape: [128, 7]
+```
+
+---
+
+### Summary Table: Key Tensor Shapes
+
+| Tensor Name | Shape | Description |
+|-------------|-------|-------------|
+| `x` (input) | `[N_total, 32]` | Positional encoding (from process_attributes) |
+| `x_sim` (full) | `[2995, 32]` | Condition for full graph (Laplacian eigenvectors) |
+| `x_sim` (batch) | `[128, 32]` | Condition indexed by original_idx |
+| `n_feat` | `[N_total, 65]` | Node features (pos + degree + ego) |
+| `cond_hidden` | `[128, 64]` | Projected condition (all layers 1-4) |
+| `cond_first_layer` | `[128, 65]` | Adapted condition (layer 0 only) |
+| `h_frozen` (layer 0 input) | `[N_total, 65]` | Frozen branch features |
+| `h_frozen` (layer 1+ input) | `[N_total, 64]` | Frozen branch features |
+| `h_ctrl` | `[N_total, 64]` | Control branch features |
+| `zero_out` | `[N_total, 64]` | Zero-initialized layer output |
+| `scaled_zero` | `[N_total, 64]` | Scaled residual (0.01 × zero_out) |
+| `out` (readout) | `[128, 64]` | Graph-level representation |
+| `x` (final) | `[128, 7]` | Class logits |
+
+**Note on Condition Broadcasting:**
+The condition tensors (`cond_hidden` and `cond_first_layer`) have shape `[B, dim]` where `B` is the batch size (number of subgraphs). These are broadcast to `[N_total, dim]` by repeating each graph's condition for all its nodes using the `batch` assignment vector. This allows element-wise addition with `h_ctrl` which has shape `[N_total, dim]`.

@@ -72,7 +72,7 @@ class GCC_GraphControl(nn.Module):
                 h_frozen = layer_frozen(h_frozen, edge_index)
 
             if layer_idx == 0:
-                ctrl_input = h_ctrl + cond_first_layer
+                ctrl_input = h_ctrl + cond_first_layer # To Do -> fix (broadcast고려해서 고쳐야 함)
             else:
                 ctrl_input = h_ctrl + cond_hidden
             h_ctrl = layer_ctrl(ctrl_input, edge_index)
